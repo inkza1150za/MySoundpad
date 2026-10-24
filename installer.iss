@@ -6,6 +6,9 @@
 ;   /fakenocable=1  ทำเหมือนเครื่องยังไม่มี VB-CABLE (แสดงตัวเลือกได้แม้ติดตั้งแบบเงียบ)
 ;   /cabletest=1    ดาวน์โหลด + ตรวจลายเซ็น + แตกไฟล์ แต่ไม่เปิดตัวติดตั้ง VB-CABLE
 ;   /cableurl=URL   เปลี่ยนลิงก์ดาวน์โหลด (ใช้ทดสอบกรณีโหลดไม่ได้)
+; พารามิเตอร์ของตัวถอนการติดตั้ง (unins000.exe):
+;   /deletedata=1   ถอนแบบเงียบแล้วลบข้อมูลผู้ใช้ด้วย (ปกติถอนแบบเงียบจะเก็บข้อมูลไว้)
+;   /datadir=PATH   ใช้โฟลเดอร์อื่นแทน %APPDATA%\MySoundpad (ใช้ทดสอบ ไม่แตะข้อมูลจริง)
 
 #define MyAppName "MySoundpad"
 #define MyAppVersion "1.3.0"
@@ -29,6 +32,8 @@ OutputDir=build\installer
 OutputBaseFilename=MySoundpad-Setup-{#MyAppVersion}
 SetupIconFile=build_assets\icon.ico
 UninstallDisplayIcon={app}\{#MyAppExe}
+; Inno เปลี่ยนชื่อ unins000.exe ไม่ได้ จึงย้ายไปไว้ในโฟลเดอร์ย่อย และวาง shortcut ชื่ออ่านง่ายไว้แทน
+UninstallFilesDir={app}\uninstall
 UninstallDisplayName={#MyAppName}
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -42,6 +47,10 @@ Name: "thai"; MessagesFile: "compiler:Languages\Thai.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [CustomMessages]
+thai.UninstallLink=ถอนการติดตั้ง {#MyAppName}
+english.UninstallLink=Uninstall {#MyAppName}
+thai.DeleteData=ลบข้อมูลของ {#MyAppName} ด้วยไหม?%n%n%1%n• รายการเสียง ปุ่มลัด และการตั้งค่า%n• เพลงที่ดาวน์โหลดจาก YouTube (%2 ไฟล์)%n%nไฟล์เสียงที่คุณเพิ่มจากโฟลเดอร์อื่น (เช่น Downloads) จะไม่ถูกลบ%nVB-CABLE ไม่ถูกลบ (ถ้าจะลบ ให้ถอนแยกเอง)%n%nถ้าจะติดตั้งใหม่ภายหลังและอยากได้รายการเสียงเดิม ให้เลือก "ไม่"
+english.DeleteData=Also delete your {#MyAppName} data?%n%n%1%n• Sound list, hotkeys and settings%n• Sounds downloaded from YouTube (%2 files)%n%nSound files you added from other folders (e.g. Downloads) are not deleted.%nVB-CABLE is not removed (uninstall it separately if you want).%n%nChoose "No" if you may reinstall later and want to keep your sound list.
 thai.OpenCablePage=เปิดเว็บดาวน์โหลด VB-CABLE
 english.OpenCablePage=Open the VB-CABLE download page
 thai.CableGroup=ไมค์เสมือน (จำเป็นสำหรับส่งเสียงเข้า Discord / เกม):
@@ -75,6 +84,11 @@ Source: "build\dist\MySoundpad\*"; DestDir: "{app}"; Flags: ignoreversion recurs
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; Tasks: desktopicon
+Name: "{app}\{cm:UninstallLink}"; Filename: "{uninstallexe}"; IconFilename: "{app}\{#MyAppExe}"
+
+[InstallDelete]
+; ตัวถอนการติดตั้งของเวอร์ชันก่อน 1.3.0 ที่อยู่หน้าโฟลเดอร์โปรแกรม (ย้ายไป uninstall\ แล้ว)
+Type: files; Name: "{app}\unins???.*"
 
 [Run]
 Filename: "{#CablePage}"; Description: "{cm:OpenCablePage}"; Flags: shellexec postinstall skipifsilent unchecked; Check: not CableInstalled
@@ -195,4 +209,47 @@ procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if (CurStep = ssPostInstall) and WizardIsTaskSelected('installcable') then
     InstallCable;
+end;
+
+{ ---- ถอนการติดตั้ง: ถามว่าจะลบข้อมูลผู้ใช้ด้วยไหม (ค่าเริ่มต้น = ไม่ลบ) ---- }
+function CountFiles(const Dir: String): Integer;
+var
+  FindRec: TFindRec;
+begin
+  Result := 0;
+  if FindFirst(Dir + '\*.mp3', FindRec) then
+  try
+    repeat
+      Result := Result + 1;
+    until not FindNext(FindRec);
+  finally
+    FindClose(FindRec);
+  end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  DataDir, Msg: String;
+  Delete: Boolean;
+begin
+  if CurUninstallStep <> usPostUninstall then
+    Exit;
+  DataDir := ExpandConstant('{param:datadir|{userappdata}\{#MyAppName}}');
+  if not DirExists(DataDir) then
+    Exit;
+  if UninstallSilent then
+    Delete := TestParam('deletedata')  { ถอนแบบเงียบ: ไม่ลบ เว้นแต่สั่ง /deletedata=1 }
+  else
+  begin
+    { บรรทัดที่ขึ้นต้นด้วย [ ใน [Code] จะถูกอ่านเป็นหัว section จึงต้องให้ [ อยู่กลางบรรทัด }
+    Msg := FmtMessage(CustomMessage('DeleteData'), [DataDir, IntToStr(CountFiles(DataDir + '\sounds\youtube'))]);
+    Delete := MsgBox(Msg, mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+  end;
+  if Delete then
+  begin
+    Log('Deleting user data: ' + DataDir);
+    DelTree(DataDir, True, True, True);
+  end
+  else
+    Log('Keeping user data: ' + DataDir);
 end;

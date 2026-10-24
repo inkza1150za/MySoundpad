@@ -173,11 +173,22 @@
 
 | อะไร | ที่อยู่ |
 |---|---|
-| ตัวโปรแกรม | `%LOCALAPPDATA%\Programs\MySoundpad` |
+| ตัวโปรแกรม | `%LOCALAPPDATA%\Programs\MySoundpad` (ตัวถอนการติดตั้งอยู่ในโฟลเดอร์ย่อย `uninstall\`) |
 | รายการเสียงและการตั้งค่า | `%APPDATA%\MySoundpad\soundpad_data.json` |
 | เสียงที่โหลดจาก YouTube | `%APPDATA%\MySoundpad\sounds\youtube` |
 
-ถอนการติดตั้งที่ **Settings → Apps → MySoundpad → Uninstall** ข้อมูลใน `%APPDATA%\MySoundpad` จะยังอยู่ ถ้าไม่ใช้แล้วลบโฟลเดอร์นั้นเองได้
+### 🗑 ถอนการติดตั้ง
+1. ปิด MySoundpad ก่อน
+2. เลือกวิธีใดวิธีหนึ่ง:
+   - **Settings → Apps → Installed apps → MySoundpad → Uninstall**
+   - หรือดับเบิลคลิก **"ถอนการติดตั้ง MySoundpad"** ในโฟลเดอร์โปรแกรม `%LOCALAPPDATA%\Programs\MySoundpad`
+3. ตอนท้าย ตัวถอนการติดตั้งจะถามว่า **"ลบข้อมูลของ MySoundpad ด้วยไหม?"**
+   - **ใช่:** ลบรายการเสียง ปุ่มลัด การตั้งค่า และเพลงที่ดาวน์โหลดจาก YouTube (`%APPDATA%\MySoundpad`)
+   - **ไม่** (ค่าเริ่มต้น): เก็บไว้ ติดตั้งใหม่ภายหลังจะได้รายการเสียงเดิมกลับมา
+   - ไฟล์เสียงที่คุณเพิ่มจากโฟลเดอร์อื่น (เช่น Downloads) จะไม่ถูกลบไม่ว่าจะเลือกแบบไหน
+4. **VB-CABLE ไม่ถูกลบ** เพราะเป็นไดรเวอร์แยกที่โปรแกรมอื่นอาจใช้อยู่ ถ้าจะลบ ให้เปิด `VBCABLE_Setup_x64.exe` ด้วย Run as administrator แล้วกด **Remove Driver** จากนั้นรีสตาร์ทเครื่อง
+
+> ถอนแบบเงียบ (สำหรับสคริปต์): `uninstall\unins000.exe /VERYSILENT` จะเก็บข้อมูลไว้ เพิ่ม `/deletedata=1` ถ้าต้องการลบด้วย
 
 ---
 
