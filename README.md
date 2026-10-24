@@ -218,7 +218,21 @@
 ### โครงสร้างโปรเจกต์
 ```
 MySoundpad/
-├── soundpad.py              # โค้ดทั้งโปรแกรม
+├── soundpad.py              # จุดเปิดโปรแกรม: กันเปิดซ้อน, --selftest, เปิดหน้าจอ
+├── mysoundpad/              # โค้ดทั้งหมด แยกตามหน้าที่
+│   ├── config.py            #   ชื่อ/เวอร์ชัน (APP_VERSION), ที่เก็บข้อมูล, ค่าตั้งต้นต่างๆ
+│   ├── theme.py             #   ธีมมืด/สว่าง, สีแถบสถานะ, ไอคอน
+│   ├── audio.py             #   โหลดเสียง + cache, mixer, ไมค์ผ่าน, soft limiter
+│   ├── streaming.py         #   ffmpeg ถอดรหัสทีละช่วง: สตรีม YouTube และเพลงยาวจากดิสก์
+│   ├── hotkeys.py           #   ปุ่มลัดแบบ global
+│   ├── youtube.py           #   yt-dlp: ข้อมูลคลิป, ดาวน์โหลด, ลิงก์สตรีม, อัปเดตตัวโหลด
+│   ├── updater.py           #   เช็กเวอร์ชันจาก GitHub, ดาวน์โหลด + ตรวจ SHA-256
+│   ├── instance.py          #   กันเปิดโปรแกรมซ้อน
+│   ├── selftest.py          #   โหมดตรวจตัวเอง
+│   └── ui/
+│       ├── app.py           #   หน้าจอหลัก
+│       ├── dialogs.py       #   หน้าต่างตั้งปุ่มลัด / อัปเดต
+│       └── youtube_dialog.py#   หน้าต่าง YouTube + หลอดเลือกช่วง + ฟังตัวอย่าง
 ├── run_soundpad.bat         # รันจากซอร์สโค้ด (ติดตั้งไลบรารีให้ถ้ายังไม่มี)
 ├── build.bat                # build exe + ตัวติดตั้ง
 ├── installer.iss            # สคริปต์ Inno Setup (ต้องบันทึกเป็น UTF-8 with BOM)
@@ -253,7 +267,7 @@ python soundpad.py
 
 ### ออกเวอร์ชันใหม่
 1. แก้เลขเวอร์ชันให้ตรงกันทั้ง 3 จุด แล้วรัน `build.bat`:
-   - `soundpad.py` → `APP_VERSION`
+   - `mysoundpad/config.py` → `APP_VERSION`
    - `installer.iss` → `#define MyAppVersion`
    - `build_assets/version_info.txt` → `filevers`, `prodvers`, `FileVersion`, `ProductVersion`
 2. สร้าง GitHub Release ที่ repo นี้ ด้วย tag `vX.Y.Z` (ต้องตรงกับ `APP_VERSION`) แล้วแนบไฟล์ `MySoundpad-Setup-X.Y.Z.exe`
