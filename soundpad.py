@@ -26,7 +26,7 @@ import soundfile as sf
 from pynput import keyboard
 
 APP_NAME = "MySoundpad"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 FROZEN = getattr(sys, "frozen", False)  # True เมื่อรันจาก .exe (PyInstaller)
 APP_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 RES_DIR = getattr(sys, "_MEIPASS", APP_DIR)  # ไฟล์ที่แพ็กมากับ exe เช่น icon
@@ -38,6 +38,11 @@ BLOCK = 512
 YT_DIR = os.path.join(DATA_DIR, "sounds", "youtube")
 YTDLP_ZIP = os.path.join(DATA_DIR, "yt-dlp.zip")  # ตัวโหลดที่อัปเดตแล้ว ใช้แทนตัวที่แพ็กมา
 YTDLP_RELEASE = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/"
+UPDATE_REPO = "inkza1150za/MySoundpad"
+# ตั้ง MYSOUNDPAD_UPDATE_API ได้ (ใช้ทดสอบกับเซิร์ฟเวอร์จำลอง)
+UPDATE_API = os.environ.get("MYSOUNDPAD_UPDATE_API") or f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
+UPDATE_CHECK_HOURS = 24
+UPDATE_ASSET_RE = re.compile(r"^MySoundpad-Setup-[\d.]+\.exe$", re.I)
 YT_URL_RE = re.compile(r"^https?://((www|m|music)\.)?(youtube\.com|youtu\.be)/\S+$", re.I)
 YT_MAX_MINUTES = 10
 STREAM_PREBUFFER = 0.5  # วินาทีที่ต้องมีใน buffer ก่อนเริ่มเล่นสตรีม
@@ -82,6 +87,7 @@ def use_theme(name):
 
 # แถบสถานะด้านล่าง: ชนิด -> ข้อความบนป้าย
 STATUS_LABELS = {"ready": "พร้อม", "playing": "กำลังเล่น", "paused": "พักอยู่", "busy": "กำลังทำงาน",
+                 "update": "มีอัปเดต",
                  "success": "สำเร็จ", "error": "ผิดพลาด", "warn": "แจ้งเตือน", "stopped": "หยุดแล้ว"}
 
 
@@ -96,6 +102,7 @@ def status_colors():
         "error":   (T["err_bg"], T["err_fg"], T["err"], T["err"]),
         "warn":    (T["warn_bg"], T["warn_fg"], T["warn"], T["warn"]),
         "stopped": (T["surface2"], T["muted"], T["muted"], T["border"]),
+        "update":  (T["purple"], "#ffffff", T["purple_hi"], T["purple"]),
     }
 
 
@@ -103,7 +110,8 @@ def status_kind(text):
     """แยกชนิดสถานะจากข้อความ (ข้อความสถานะในแอปขึ้นต้นด้วยสัญลักษณ์บอกชนิดอยู่แล้ว)"""
     for prefixes, kind in ((("▶",), "playing"), (("⏸",), "paused"), (("⚠",), "error"),
                            (("✅", "เพิ่ม "), "success"), (("■", "ยกเลิก"), "stopped"),
-                           (("⏳", "🔎", "⬇", "⚙", "⬆"), "busy"), (("ยังไม่ได้เลือก",), "warn")):
+                           (("⏳", "🔎", "⬇", "⚙", "⬆"), "busy"), (("ยังไม่ได้เลือก",), "warn"),
+                           (("🆕",), "update")):
         if text.startswith(prefixes):
             return kind
     return "ready"
@@ -167,6 +175,8 @@ def apply_theme(root):
         s.map(w, background=[("active", bg)], foreground=[("active", T["pink_hi"])],
               indicatorbackground=[("selected", pink), ("active", hv)])
 
+    s.configure("Horizontal.TProgressbar", background=pink, troughcolor=sf2, bordercolor=bd, lightcolor=pink,
+                darkcolor=pink)
     s.configure("Horizontal.TScale", background=pink, troughcolor=sf2, bordercolor=bd, lightcolor=pink,
                 darkcolor=pink)
     s.map("Horizontal.TScale", background=[("active", T["pink_hi"])])
@@ -1387,6 +1397,209 @@ class YouTubeDialog(tk.Toplevel):
         super().destroy()
 
 
+# ---------------------------------------------------------------- update
+
+
+def parse_version(text):
+    """'v1.4.0' / '1.4' -> (1, 4, 0); อ่านไม่ได้ -> None"""
+    m = re.fullmatch(r"v?(\d+)(?:\.(\d+))?(?:\.(\d+))?", (text or "").strip())
+    return tuple(int(x or 0) for x in m.groups()) if m else None
+
+
+def check_for_update():
+    """ถาม GitHub ว่า Release ล่าสุด (ไม่นับ draft/pre-release) ใหม่กว่าเวอร์ชันนี้ไหม
+
+    คืน dict ของเวอร์ชันใหม่ หรือ None ถ้าใช้ล่าสุดอยู่แล้ว (เชื่อมต่อไม่ได้ = โยน exception)
+    """
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(UPDATE_API, headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}",
+                                                      "Accept": "application/vnd.github+json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            rel = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:  # repo ยังไม่มี Release (หรือมีแต่ pre-release) = ยังไม่มีอะไรให้อัปเดต
+            return None
+        raise
+    latest = parse_version(rel.get("tag_name"))
+    if not latest or rel.get("draft") or rel.get("prerelease") or latest <= parse_version(APP_VERSION):
+        return None
+    asset = next((a for a in rel.get("assets") or [] if UPDATE_ASSET_RE.match(a.get("name", ""))), None)
+    sha = None
+    if asset:
+        digest = (asset.get("digest") or "").lower()
+        if digest.startswith("sha256:"):
+            sha = digest[7:]
+        else:  # Release เก่าที่ GitHub ไม่ได้เก็บ digest: ใช้ค่า SHA-256 ที่เขียนไว้ในคำอธิบาย
+            m = re.search(r"\b[0-9a-fA-F]{64}\b", rel.get("body") or "")
+            sha = m.group(0).lower() if m else None
+    return {"version": ".".join(map(str, latest)), "notes": rel.get("body") or "",
+            "page": rel.get("html_url") or f"https://github.com/{UPDATE_REPO}/releases/latest",
+            "url": asset.get("browser_download_url") if asset else None,
+            "name": asset.get("name") if asset else None,
+            "size": asset.get("size") if asset else None, "sha256": sha}
+
+
+def download_update(info, progress, cancelled):
+    """โหลดตัวติดตั้งไปที่ %TEMP% แล้วตรวจขนาด + SHA-256 คืน path; ไม่ตรง = โยน exception (ไม่ติดตั้ง)"""
+    import hashlib
+    import tempfile
+    import urllib.request
+    if not (info.get("url") and info.get("sha256")):
+        raise RuntimeError("Release นี้ไม่มีค่า SHA-256 ให้ตรวจ จึงไม่ติดตั้งอัตโนมัติ")
+    folder = os.path.join(tempfile.gettempdir(), f"{APP_NAME}-update")
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, os.path.basename(info["name"]))
+    part, h, done = path + ".part", hashlib.sha256(), 0
+    req = urllib.request.Request(info["url"], headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r, open(part, "wb") as f:
+            total = info.get("size") or int(r.headers.get("Content-Length") or 0)
+            while True:
+                if cancelled():
+                    raise RuntimeError("ยกเลิกการดาวน์โหลด")
+                chunk = r.read(256 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                h.update(chunk)
+                done += len(chunk)
+                progress(done, total)
+        if info.get("size") and done != info["size"]:
+            raise RuntimeError(f"ขนาดไฟล์ไม่ตรง ({done} / {info['size']} bytes)")
+        if h.hexdigest() != info["sha256"].lower():
+            raise RuntimeError("ไฟล์ที่ดาวน์โหลดมาไม่ตรงกับ SHA-256 ของ Release จึงไม่ติดตั้ง")
+    except Exception:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        raise
+    os.replace(part, path)
+    return path
+
+
+def run_installer(path):
+    """ปล่อย mutex ให้ตัวติดตั้งไม่ต้องรอแอปปิด แล้วเปิดตัวติดตั้งแบบเงียบ (ติดตั้งเสร็จจะเปิดแอปให้ใหม่)"""
+    global _instance_mutex
+    if _instance_mutex:
+        from ctypes import windll
+        windll.kernel32.CloseHandle(_instance_mutex)
+        _instance_mutex = None
+    subprocess.Popen([path, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/relaunch=1"],
+                     close_fds=True,
+                     creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+
+
+def plain_notes(md):
+    """คำอธิบาย Release (markdown) -> ข้อความอ่านง่ายในหน้าต่างเล็ก"""
+    text = re.sub(r"`([^`]*)`", r"\1", md or "")
+    text = re.sub(r"\*\*([^*]*)\*\*", r"\1", text)
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"^#{1,6}\s*", "", text, flags=re.M)
+    return text.strip() or "(ไม่มีรายละเอียด)"
+
+
+class UpdateDialog(tk.Toplevel):
+    """หน้าต่างอัปเดต: แสดงว่ามีอะไรใหม่ ดาวน์โหลดพร้อมแถบความคืบหน้า แล้วตรวจ SHA-256
+
+    self.result = path ของตัวติดตั้งที่ตรวจแล้ว / "skip" = ข้ามเวอร์ชันนี้ / None = ไว้ทีหลัง
+    """
+
+    def __init__(self, parent, info):
+        super().__init__(parent)
+        style_window(self)
+        self.title("อัปเดต MySoundpad")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.info, self.result, self.cancel = info, None, False
+        can_install = FROZEN and info.get("url") and info.get("sha256")
+
+        f = ttk.Frame(self, padding=16)
+        f.pack(fill="both")
+        ttk.Label(f, text=f"🆕 มีเวอร์ชันใหม่ {info['version']}", style="Brand.TLabel").pack(anchor="w")
+        ttk.Label(f, text=f"เวอร์ชันที่ใช้อยู่: {APP_VERSION}", style="Muted.TLabel").pack(anchor="w", pady=(2, 10))
+        ttk.Label(f, text="มีอะไรใหม่").pack(anchor="w")
+        notes = tk.Text(f, width=70, height=14, wrap="word", relief="flat", padx=10, pady=8,
+                        bg=T["surface"], fg=T["text"], insertbackground=T["text"], font=(FONT, 10),
+                        highlightthickness=1, highlightbackground=T["border"], highlightcolor=T["border"])
+        notes.insert("1.0", plain_notes(info["notes"]))
+        notes.config(state="disabled")
+        notes.pack(fill="both", pady=(4, 10))
+        self.bar = ttk.Progressbar(f, length=480, maximum=100)
+        self.v_msg = tk.StringVar()
+        if not can_install:
+            why = ("กำลังรันจากซอร์สโค้ด ให้อัปเดตด้วย git pull" if not FROZEN
+                   else "Release นี้ไม่มีตัวติดตั้งหรือค่า SHA-256 ให้ตรวจ จึงอัปเดตอัตโนมัติไม่ได้")
+            self.v_msg.set(why)
+        else:
+            self.v_msg.set("ดาวน์โหลดจาก GitHub แล้วตรวจ SHA-256 ก่อนติดตั้ง • รายการเสียงและการตั้งค่าอยู่ครบ")
+        ttk.Label(f, textvariable=self.v_msg, style="Muted.TLabel", wraplength=520).pack(anchor="w")
+
+        bar = ttk.Frame(self, padding=(16, 0, 16, 16))
+        bar.pack(fill="x")
+        if can_install:
+            self.btn_go = ttk.Button(bar, text="⬆ อัปเดตเลย", style="Pink.TButton", command=self._start)
+        else:
+            self.btn_go = ttk.Button(bar, text="🌐 เปิดหน้าดาวน์โหลด", style="Pink.TButton", command=self._open_page)
+        self.btn_go.pack(side="right")
+        self.btn_later = ttk.Button(bar, text="ไว้ทีหลัง", command=self.destroy)
+        self.btn_later.pack(side="right", padx=6)
+        self.btn_skip = ttk.Button(bar, text="ข้ามเวอร์ชันนี้", command=self._skip)
+        self.btn_skip.pack(side="left")
+        self.bind("<Escape>", lambda e: self._close())
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self.grab_set()
+        self.geometry(f"+{parent.winfo_rootx() + 80}+{parent.winfo_rooty() + 60}")
+
+    def _open_page(self):
+        import webbrowser
+        webbrowser.open(self.info["page"])
+        self.destroy()
+
+    def _skip(self):
+        self.result = "skip"
+        self.destroy()
+
+    def _close(self):
+        self.cancel = True  # ถ้ากำลังโหลดอยู่ ให้หยุด
+        self.destroy()
+
+    def _start(self):
+        for b in (self.btn_go, self.btn_skip):
+            b.config(state="disabled")
+        self.btn_later.config(text="ยกเลิก")
+        self.bar.pack(fill="x", pady=(8, 0))  # สร้างไว้ใน frame เนื้อหาแล้ว เพิ่งแสดงตอนเริ่มโหลด
+        self.v_msg.set("⬇ กำลังดาวน์โหลด...")
+
+        def progress(done, total):
+            pct = done * 100 / total if total else 0
+            self.after(0, lambda: (self.winfo_exists() and (self.bar.config(value=pct), self.v_msg.set(
+                f"⬇ กำลังดาวน์โหลด {done / 2**20:.1f} / {total / 2**20:.1f} MB"))))
+
+        def work():
+            try:
+                path = download_update(self.info, progress, lambda: self.cancel)
+                self.after(0, self._done, path, None)
+            except Exception as e:
+                self.after(0, self._done, None, e)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _done(self, path, err):
+        if not self.winfo_exists():
+            return
+        if err:
+            self.v_msg.set(f"⚠ อัปเดตไม่สำเร็จ: {str(err)[:160]}")
+            self.btn_go.config(state="normal", text="ลองใหม่")
+            self.btn_skip.config(state="normal")
+            self.btn_later.config(text="ไว้ทีหลัง")
+            return
+        self.v_msg.set("✅ ตรวจ SHA-256 ผ่าน กำลังติดตั้ง... โปรแกรมจะปิดแล้วเปิดใหม่เอง")
+        self.result = path
+        self.after(600, self.destroy)
+
+
 # ---------------------------------------------------------------- app
 
 
@@ -1428,6 +1641,10 @@ class SoundpadApp:
         self.v_stop_prev = tk.BooleanVar(value=True)
         self.v_hotkeys_on = tk.BooleanVar(value=True)
         self.v_theme = tk.StringVar(value="dark")
+        self.v_auto_update = tk.BooleanVar(value=True)
+        self.update_state = {"last_check": 0, "skip": ""}  # บันทึกลงไฟล์ตั้งค่า
+        self.update_info = None  # เวอร์ชันใหม่ที่เจอ (dict จาก check_for_update)
+        self._checking_update = False
         self.v_search = tk.StringVar()
         self.v_status = tk.StringVar(value="พร้อม")
         self.stop_hotkey = {"mods": [], "vk": 0x13}  # Pause
@@ -1456,6 +1673,7 @@ class SoundpadApp:
         self._rebind_hotkeys()
         self._tick()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
+        root.after(3000, self._auto_check_update)  # รอให้หน้าต่างขึ้นก่อน ไม่ทำให้เปิดช้า
 
     # ---------- UI
     def _build_ui(self):
@@ -1469,6 +1687,8 @@ class SoundpadApp:
         ttk.Label(head, text=APP_NAME, style="Brand.TLabel").pack(side="left")
         self.btn_theme = ttk.Button(head, command=self.toggle_theme)
         self.btn_theme.pack(side="right")
+        self.btn_update = ttk.Button(head, text="🔄 ตรวจสอบอัปเดต", command=self.on_update_button)
+        self.btn_update.pack(side="right", padx=(0, 6))
         self._update_theme_button()
         ttk.Label(head, text=f"v{APP_VERSION}", style="Muted.TLabel").pack(side="left", padx=(6, 0), pady=(6, 0))
 
@@ -1550,6 +1770,8 @@ class SoundpadApp:
         self.btn_stop_hk = ttk.Button(opt, command=self.set_stop_hotkey)
         self.btn_stop_hk.grid(row=6, column=1, sticky="e")
         self._update_stop_btn()
+        ttk.Checkbutton(opt, text="ตรวจสอบเวอร์ชันใหม่อัตโนมัติ", variable=self.v_auto_update,
+                        command=self._save).grid(row=7, column=0, columnspan=2, sticky="w")
 
         # ---- แถบสถานะ: ป้ายสี + ข้อความสี + เส้นสีด้านบน เปลี่ยนตามสถานะ
         sbar = ttk.Frame(self.root, style="StatusBar.TFrame")
@@ -2018,6 +2240,69 @@ class SoundpadApp:
         shown, total = len(self.tree.get_children()), len(self.sounds)
         self.v_count.set(f"{shown}/{total} เสียง" if q else f"{total} เสียง")
 
+    # ---------- update
+    def _auto_check_update(self):
+        due = time.time() - float(self.update_state.get("last_check") or 0) > UPDATE_CHECK_HOURS * 3600
+        if self.v_auto_update.get() and due:
+            self._start_update_check(manual=False)
+
+    def on_update_button(self):
+        if self.update_info:
+            self.open_update_dialog()
+        else:
+            self._start_update_check(manual=True)
+
+    def _start_update_check(self, manual):
+        if self._checking_update:
+            return
+        self._checking_update = True
+        if manual:
+            self.v_status.set("🔎 กำลังตรวจสอบเวอร์ชันใหม่...")
+
+        def work():
+            try:
+                info, err = check_for_update(), None
+            except Exception as e:
+                info, err = None, e
+            self.root.after(0, self._update_checked, info, err, manual)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_checked(self, info, err, manual):
+        self._checking_update = False
+        if err:  # เช็กอัตโนมัติแล้วไม่มีเน็ต = เงียบไว้
+            if manual:
+                self.v_status.set(f"⚠ ตรวจสอบอัปเดตไม่ได้: {str(err)[:120]}")
+            return
+        self.update_state["last_check"] = time.time()
+        self._save()
+        if not info:
+            if manual:
+                self.v_status.set(f"✅ ใช้เวอร์ชันล่าสุดอยู่แล้ว ({APP_VERSION})")
+            return
+        if not manual and info["version"] == self.update_state.get("skip"):
+            return  # ผู้ใช้กดข้ามเวอร์ชันนี้ไว้
+        self.update_info = info
+        self.btn_update.config(text=f"⬆ อัปเดต {info['version']}", style="Pink.TButton")
+        self.v_status.set(f"🆕 มีเวอร์ชันใหม่ {info['version']} — กดปุ่ม ⬆ อัปเดต ที่มุมขวาบน")
+        if manual:
+            self.open_update_dialog()
+
+    def open_update_dialog(self):
+        dlg = UpdateDialog(self.root, self.update_info)
+        self.root.wait_window(dlg)
+        if dlg.result == "skip":
+            self.update_state["skip"] = self.update_info["version"]
+            self.update_info = None
+            self.btn_update.config(text="🔄 ตรวจสอบอัปเดต", style="TButton")
+            self.v_status.set("พร้อม")
+            self._save()
+        elif dlg.result:
+            self.install_update(dlg.result)
+
+    def install_update(self, path):
+        self._on_close()  # บันทึก + หยุดเสียง/ffmpeg + ปิดหน้าต่าง ก่อนให้ตัวติดตั้งทับไฟล์
+        run_installer(path)
+
     def toggle_theme(self):
         self.v_theme.set("light" if self.v_theme.get() == "dark" else "dark")
         use_theme(self.v_theme.get())
@@ -2099,12 +2384,13 @@ class SoundpadApp:
             if key in st:
                 var.set(st[key])
         self.stop_hotkey = d.get("stop_hotkey", self.stop_hotkey)
+        self.update_state.update(d.get("update") or {})
         self.saved_devices = d.get("devices", {})
 
     def _setting_vars(self):
         return {"monitor_vol": self.v_monitor_vol, "cable_vol": self.v_cable_vol, "mic_vol": self.v_mic_vol,
                 "to_me": self.v_to_me, "to_mic": self.v_to_mic, "passthrough": self.v_passthrough,
-                "stop_prev": self.v_stop_prev, "theme": self.v_theme}
+                "stop_prev": self.v_stop_prev, "theme": self.v_theme, "auto_update": self.v_auto_update}
 
     @staticmethod
     def _sound_record(s):
@@ -2120,6 +2406,7 @@ class SoundpadApp:
             "sounds": [self._sound_record(s) for s in self.sounds],
             "settings": {k: v.get() for k, v in self._setting_vars().items()},
             "stop_hotkey": self.stop_hotkey,
+            "update": self.update_state,
             "devices": {"monitor": self.cb_monitor.get(), "cable": self.cb_cable.get(), "mic": self.cb_mic.get()},
         }
         try:
@@ -2144,11 +2431,16 @@ class SoundpadApp:
 SINGLE_INSTANCE_MUTEX = "MySoundpad_SingleInstance"  # ตัวติดตั้งใช้ชื่อเดียวกันเช็กว่าโปรแกรมเปิดอยู่
 
 
+_instance_mutex = None  # เก็บ handle ไว้ ตัวอัปเดตจะปล่อยก่อนเปิดตัวติดตั้ง
+
+
 def already_running():
     """เปิดซ้อน 2 ตัวจะทำให้ปุ่มลัดทำงาน 2 รอบ จึงอนุญาตแค่ตัวเดียว"""
+    global _instance_mutex
     try:
-        from ctypes import windll
-        windll.kernel32.CreateMutexW(None, False, SINGLE_INSTANCE_MUTEX)
+        from ctypes import windll, wintypes
+        windll.kernel32.CreateMutexW.restype = wintypes.HANDLE
+        _instance_mutex = windll.kernel32.CreateMutexW(None, False, SINGLE_INSTANCE_MUTEX)
         return windll.kernel32.GetLastError() == 183  # ERROR_ALREADY_EXISTS
     except Exception:
         return False

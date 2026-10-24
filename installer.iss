@@ -6,12 +6,13 @@
 ;   /fakenocable=1  ทำเหมือนเครื่องยังไม่มี VB-CABLE (แสดงตัวเลือกได้แม้ติดตั้งแบบเงียบ)
 ;   /cabletest=1    ดาวน์โหลด + ตรวจลายเซ็น + แตกไฟล์ แต่ไม่เปิดตัวติดตั้ง VB-CABLE
 ;   /cableurl=URL   เปลี่ยนลิงก์ดาวน์โหลด (ใช้ทดสอบกรณีโหลดไม่ได้)
+;   /relaunch=1     เปิดแอปให้หลังติดตั้งเสร็จแม้ติดตั้งแบบเงียบ (แอปใช้ตอนอัปเดตตัวเอง)
 ; พารามิเตอร์ของตัวถอนการติดตั้ง (unins000.exe):
 ;   /deletedata=1   ถอนแบบเงียบแล้วลบข้อมูลผู้ใช้ด้วย (ปกติถอนแบบเงียบจะเก็บข้อมูลไว้)
 ;   /datadir=PATH   ใช้โฟลเดอร์อื่นแทน %APPDATA%\MySoundpad (ใช้ทดสอบ ไม่แตะข้อมูลจริง)
 
 #define MyAppName "MySoundpad"
-#define MyAppVersion "1.3.0"
+#define MyAppVersion "1.4.0"
 #define MyAppExe "MySoundpad.exe"
 #define CableUrl "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip"
 #define CablePage "https://vb-audio.com/Cable/"
@@ -93,6 +94,8 @@ Type: files; Name: "{app}\unins???.*"
 [Run]
 Filename: "{#CablePage}"; Description: "{cm:OpenCablePage}"; Flags: shellexec postinstall skipifsilent unchecked; Check: not CableInstalled
 Filename: "{app}\{#MyAppExe}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
+; อัปเดตจากในแอป (ติดตั้งแบบเงียบพร้อม /relaunch=1): เปิดแอปกลับให้เอง
+Filename: "{app}\{#MyAppExe}"; Flags: nowait; Check: TestParam('relaunch')
 
 [Code]
 var
