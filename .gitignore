@@ -1,0 +1,9 @@
+# ผลลัพธ์จากการ build (สร้างใหม่ได้ด้วย build.bat)
+build/
+__pycache__/
+*.pyc
+*.spec
+
+# ข้อมูลส่วนตัว / ไฟล์เพลง (มีลิขสิทธิ์)
+soundpad_data.json
+sounds/
