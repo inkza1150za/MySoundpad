@@ -12,7 +12,7 @@ if not exist "%ASSETS%\icon.ico" python "%ASSETS%\make_icon.py" || goto :fail
 
 echo === [1/2] PyInstaller ===
 python -m PyInstaller --noconfirm --clean --windowed --name MySoundpad ^
-  --icon "%ASSETS%\icon.ico" --add-data "%ASSETS%\icon.ico;." ^
+  --icon "%ASSETS%\icon.ico" --add-data "%ASSETS%\icon.ico;." --add-data "%ASSETS%\icon.png;." ^
   --version-file "%ASSETS%\version_info.txt" ^
   --collect-data imageio_ffmpeg --collect-submodules yt_dlp ^
   --hidden-import pynput.keyboard._win32 --hidden-import pynput.mouse._win32 ^

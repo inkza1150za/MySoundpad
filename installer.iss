@@ -2,7 +2,7 @@
 ; ติดตั้งแบบรายผู้ใช้: ไม่ต้องใช้สิทธิ์แอดมิน, ข้อมูลผู้ใช้อยู่ที่ %APPDATA%\MySoundpad (ถอนโปรแกรมแล้วไม่หาย)
 
 #define MyAppName "MySoundpad"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.2.0"
 #define MyAppExe "MySoundpad.exe"
 
 [Setup]

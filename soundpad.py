@@ -21,7 +21,7 @@ import soundfile as sf
 from pynput import keyboard
 
 APP_NAME = "MySoundpad"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.2.0"
 FROZEN = getattr(sys, "frozen", False)  # True เมื่อรันจาก .exe (PyInstaller)
 APP_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 RES_DIR = getattr(sys, "_MEIPASS", APP_DIR)  # ไฟล์ที่แพ็กมากับ exe เช่น icon
@@ -39,6 +39,196 @@ STREAM_PREBUFFER = 0.5  # วินาทีที่ต้องมีใน bu
 STREAM_TIMEOUT = 15
 STREAM_AHEAD = 30  # ถอดรหัสล่วงหน้าไม่เกินกี่วินาที (คุม RAM)
 STREAM_KEEP = 5    # เก็บส่วนที่เล่นผ่านไปแล้วไว้กี่วินาทีก่อนทิ้ง
+
+# ---------------------------------------------------------------- theme
+# ธีมแบบแอปวิดีโอสมัยใหม่ เน้นสีชมพู-ม่วง มีทั้งแบบมืดและสว่าง
+THEMES = {
+    "dark": {
+        "dark": True,
+        "bg": "#0f0f12", "surface": "#1b1b21", "surface2": "#26262e", "hover": "#33333d", "border": "#3a3a46",
+        "text": "#f4f4f5", "muted": "#a1a1aa", "faint": "#6b6b75",
+        "pink": "#ec4899", "pink_hi": "#f472b6", "pink_lo": "#be185d",
+        "purple": "#8b5cf6", "purple_hi": "#a78bfa", "purple_lo": "#6d28d9",
+        "sel": "#6d28d9", "playing": "#3b1d4f", "playing_fg": "#f472b6", "paused": "#4a3712", "warn": "#fbbf24",
+        "ok": "#4ade80", "ok_bg": "#14532d", "ok_fg": "#86efac",
+        "err": "#f87171", "err_bg": "#7f1d1d", "err_fg": "#fecaca",
+        "warn_bg": "#78350f", "warn_fg": "#fde68a", "playhead": "#ffffff",
+    },
+    "light": {
+        "dark": False,
+        "bg": "#f9f9fb", "surface": "#ffffff", "surface2": "#efeff4", "hover": "#e4e4ec", "border": "#d4d4dc",
+        "text": "#18181b", "muted": "#5f5f6b", "faint": "#a1a1aa",
+        "pink": "#db2777", "pink_hi": "#ec4899", "pink_lo": "#9d174d",
+        "purple": "#7c3aed", "purple_hi": "#8b5cf6", "purple_lo": "#5b21b6",
+        "sel": "#7c3aed", "playing": "#fce7f3", "playing_fg": "#be185d", "paused": "#fef3c7", "warn": "#b45309",
+        "ok": "#15803d", "ok_bg": "#dcfce7", "ok_fg": "#166534",
+        "err": "#dc2626", "err_bg": "#fee2e2", "err_fg": "#991b1b",
+        "warn_bg": "#fef3c7", "warn_fg": "#92400e", "playhead": "#18181b",
+    },
+}
+T = dict(THEMES["dark"])  # สีที่ใช้อยู่ตอนนี้ (เปลี่ยนด้วย use_theme)
+FONT = "Segoe UI"
+
+
+def use_theme(name):
+    T.clear()
+    T.update(THEMES.get(name, THEMES["dark"]))
+
+
+# แถบสถานะด้านล่าง: ชนิด -> ข้อความบนป้าย
+STATUS_LABELS = {"ready": "พร้อม", "playing": "กำลังเล่น", "paused": "พักอยู่", "busy": "กำลังทำงาน",
+                 "success": "สำเร็จ", "error": "ผิดพลาด", "warn": "แจ้งเตือน", "stopped": "หยุดแล้ว"}
+
+
+def status_colors():
+    """ชนิดสถานะ -> (สีพื้นป้าย, สีตัวอักษรป้าย, สีข้อความ, สีเส้นด้านบน) ตามธีมปัจจุบัน"""
+    return {
+        "ready":   (T["ok_bg"], T["ok_fg"], T["muted"], T["border"]),
+        "playing": (T["pink"], "#ffffff", T["playing_fg"], T["pink"]),
+        "paused":  (T["warn_bg"], T["warn_fg"], T["warn"], T["warn"]),
+        "busy":    (T["purple"], "#ffffff", T["purple_hi"], T["purple"]),
+        "success": (T["ok_bg"], T["ok_fg"], T["ok"], T["ok"]),
+        "error":   (T["err_bg"], T["err_fg"], T["err"], T["err"]),
+        "warn":    (T["warn_bg"], T["warn_fg"], T["warn"], T["warn"]),
+        "stopped": (T["surface2"], T["muted"], T["muted"], T["border"]),
+    }
+
+
+def status_kind(text):
+    """แยกชนิดสถานะจากข้อความ (ข้อความสถานะในแอปขึ้นต้นด้วยสัญลักษณ์บอกชนิดอยู่แล้ว)"""
+    for prefixes, kind in ((("▶",), "playing"), (("⏸",), "paused"), (("⚠",), "error"),
+                           (("✅", "เพิ่ม "), "success"), (("■", "ยกเลิก"), "stopped"),
+                           (("⏳", "🔎", "⬇", "⚙", "⬆"), "busy"), (("ยังไม่ได้เลือก",), "warn")):
+        if text.startswith(prefixes):
+            return kind
+    return "ready"
+
+
+def apply_theme(root):
+    """ตั้งสี ttk ทั้งแอป (ใช้ธีม clam เพราะปรับสีได้ครบ)"""
+    s = ttk.Style(root)
+    s.theme_use("clam")
+    bg, sf, sf2, hv, bd = T["bg"], T["surface"], T["surface2"], T["hover"], T["border"]
+    tx, mu, pink, purple = T["text"], T["muted"], T["pink"], T["purple"]
+
+    s.configure(".", background=bg, foreground=tx, fieldbackground=sf2, bordercolor=bd, lightcolor=sf2,
+                darkcolor=sf2, troughcolor=sf2, focuscolor=purple, selectbackground=T["sel"],
+                selectforeground="#ffffff", insertcolor=tx, arrowcolor=mu, font=(FONT, 10))
+    s.configure("TFrame", background=bg)
+    s.configure("TLabel", background=bg, foreground=tx)
+    s.configure("Muted.TLabel", foreground=mu)
+    s.configure("Accent.TLabel", foreground=T["playing_fg"])
+    s.configure("Brand.TLabel", foreground=pink, font=(FONT, 16, "bold"))
+    s.configure("StatusBar.TFrame", background=sf)
+    for kind, (badge_bg, badge_fg, text_fg, line) in status_colors().items():
+        s.configure(f"Badge.{kind}.TLabel", background=badge_bg, foreground=badge_fg, font=(FONT, 9, "bold"),
+                    padding=(10, 2), anchor="center")
+        s.configure(f"StatusText.{kind}.TLabel", background=sf, foreground=text_fg)
+        s.configure(f"Line.{kind}.TFrame", background=line)
+
+    # ปุ่ม: ปกติสีเทาเข้ม, Pink/Purple = ปุ่มหลัก
+    s.configure("TButton", background=sf2, foreground=tx, bordercolor=bd, lightcolor=sf2, darkcolor=sf2,
+                padding=(10, 5), focusthickness=0)
+    s.map("TButton", background=[("pressed", bd), ("active", hv), ("disabled", sf)],
+          foreground=[("disabled", T["faint"])], bordercolor=[("active", purple)],
+          lightcolor=[("active", hv)], darkcolor=[("active", hv)])
+    s.configure("Big.TButton", font=(FONT, 10, "bold"))
+    for name, base, hi, lo in (("Pink", pink, T["pink_hi"], T["pink_lo"]),
+                               ("Purple", purple, T["purple_hi"], T["purple_lo"])):
+        s.configure(f"{name}.TButton", background=base, foreground="#ffffff", bordercolor=base, lightcolor=base,
+                    darkcolor=base, font=(FONT, 10, "bold"), padding=(14, 5))
+        s.map(f"{name}.TButton", background=[("pressed", lo), ("active", hi)],
+              bordercolor=[("pressed", lo), ("active", hi)], lightcolor=[("pressed", lo), ("active", hi)],
+              darkcolor=[("pressed", lo), ("active", hi)])
+
+    # ช่องกรอก
+    for w in ("TEntry", "TSpinbox", "TCombobox"):
+        s.configure(w, fieldbackground=sf2, foreground=tx, background=sf2, bordercolor=bd, lightcolor=sf2,
+                    darkcolor=sf2, insertcolor=tx, arrowcolor=mu)
+        s.map(w, bordercolor=[("focus", pink), ("hover", purple)], lightcolor=[("focus", pink)])
+    s.configure("TEntry", padding=4)
+    s.map("TCombobox", fieldbackground=[("readonly", sf2)], foreground=[("readonly", tx)],
+          selectbackground=[("readonly", sf2)], selectforeground=[("readonly", tx)], background=[("active", hv)],
+          bordercolor=[("focus", pink), ("hover", purple)])
+    root.option_add("*TCombobox*Listbox.background", sf2)
+    root.option_add("*TCombobox*Listbox.foreground", tx)
+    root.option_add("*TCombobox*Listbox.selectBackground", T["sel"])
+    root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+    root.option_add("*TCombobox*Listbox.font", (FONT, 10))
+
+    for w in ("TCheckbutton", "TRadiobutton"):
+        s.configure(w, background=bg, foreground=tx, indicatorbackground=sf2, indicatorforeground="#ffffff",
+                    upperbordercolor=bd, lowerbordercolor=bd)
+        s.map(w, background=[("active", bg)], foreground=[("active", T["pink_hi"])],
+              indicatorbackground=[("selected", pink), ("active", hv)])
+
+    s.configure("Horizontal.TScale", background=pink, troughcolor=sf2, bordercolor=bd, lightcolor=pink,
+                darkcolor=pink)
+    s.map("Horizontal.TScale", background=[("active", T["pink_hi"])])
+    s.configure("TLabelframe", background=bg, bordercolor=bd, lightcolor=bg, darkcolor=bg)
+    s.configure("TLabelframe.Label", background=bg, foreground=T["purple_hi"], font=(FONT, 10, "bold"))
+
+    s.configure("Treeview", background=sf, fieldbackground=sf, foreground=tx, bordercolor=bd, lightcolor=sf,
+                darkcolor=sf, rowheight=30)
+    s.map("Treeview", background=[("selected", T["sel"])], foreground=[("selected", "#ffffff")])
+    s.configure("Treeview.Heading", background=bg, foreground=mu, bordercolor=bd, lightcolor=bg, darkcolor=bg,
+                font=(FONT, 9, "bold"), padding=(6, 6))
+    s.map("Treeview.Heading", background=[("active", sf2)], foreground=[("active", tx)])
+    s.configure("Vertical.TScrollbar", background=sf2, troughcolor=bg, bordercolor=bg, arrowcolor=mu,
+                lightcolor=sf2, darkcolor=sf2, gripcount=0)
+    s.map("Vertical.TScrollbar", background=[("active", hv)])
+
+
+def style_window(win):
+    """พื้นหลังตามธีม + แถบชื่อหน้าต่างมืด/สว่างตามธีม และขอบสีชมพู (สีแถบและขอบใช้ได้บน Windows 11)"""
+    win.configure(bg=T["bg"])
+    try:
+        from ctypes import byref, c_int, sizeof, windll
+        win.update_idletasks()
+        hwnd = windll.user32.GetParent(win.winfo_id())
+
+        def dwm(attr, value):
+            v = c_int(value)
+            return windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, byref(v), sizeof(v))
+
+        dark = 1 if T["dark"] else 0
+        if dwm(20, dark) != 0:  # DWMWA_USE_IMMERSIVE_DARK_MODE
+            dwm(19, dark)       # ค่าเดิมของ Windows 10 รุ่นเก่า
+        rgb = lambda h: int(h[5:7] + h[3:5] + h[1:3], 16)  # '#RRGGBB' -> COLORREF 0x00BBGGRR
+        dwm(35, rgb(T["bg"]))    # DWMWA_CAPTION_COLOR
+        dwm(36, rgb(T["text"]))  # DWMWA_TEXT_COLOR
+        dwm(34, rgb(T["pink"]))  # DWMWA_BORDER_COLOR
+    except Exception:
+        pass
+
+
+def set_app_icon(root):
+    """ไอคอนโปรแกรมบนทุกหน้าต่าง (รวมหน้าต่างย่อยที่เปิดทีหลัง) และบน taskbar"""
+    try:
+        # ให้ Windows แยกโปรแกรมนี้ออกจาก python.exe บน taskbar จึงใช้ไอคอนของเราเอง
+        from ctypes import windll
+        windll.shell32.SetCurrentProcessExplicitAppUserModelID(f"{APP_NAME}.App")
+    except Exception:
+        pass
+    ico, png = find_resource("icon.ico"), find_resource("icon.png")
+    try:
+        if ico:
+            root.iconbitmap(default=ico)  # default = ใช้กับ Toplevel ทุกตัวที่สร้างภายหลังด้วย
+        if png:
+            root._app_icon = tk.PhotoImage(file=png)  # เก็บ ref กันโดนเก็บขยะ
+            root.iconphoto(True, root._app_icon)      # True = ใช้กับหน้าต่างย่อยด้วย / ไอคอนใหญ่บน taskbar
+    except tk.TclError:
+        pass
+
+
+def find_resource(name):
+    """ไฟล์ที่แพ็กมากับ exe (RES_DIR) หรือใน build_assets ตอนรันจากซอร์สโค้ด"""
+    for d in (RES_DIR, os.path.join(APP_DIR, "build_assets")):
+        p = os.path.join(d, name)
+        if os.path.exists(p):
+            return p
+    return None
+
 
 # ---------------------------------------------------------------- audio utils
 
@@ -234,6 +424,7 @@ class OutputMixer:
         self.get_volume = get_volume
         self.mic = mic
         self.voices = []  # [data (ndarray หรือ StreamSource), pos, sound_id]
+        self.paused = False  # พัก: เก็บตำแหน่งเสียงไว้ ไม่เดินหน้า (เสียงไมค์จริงยังผ่านตามปกติ)
         self.lock = threading.Lock()
         self.stream = sd.OutputStream(device=device, samplerate=self.sr, channels=self.channels,
                                       dtype="float32", blocksize=BLOCK, callback=self._cb)
@@ -254,21 +445,22 @@ class OutputMixer:
     def _cb(self, outdata, frames, t, status):
         out = np.zeros((frames, 2), np.float32)
         with self.lock:
-            alive = []
-            for v in self.voices:
-                data, pos = v[0], v[1]
-                if isinstance(data, StreamSource):
-                    chunk = data.read(pos, frames)  # ข้อมูลมาไม่ทัน = เงียบชั่วครู่ ไม่ข้ามเสียง
-                    v[1] = pos + len(chunk)
-                    finished = data.finished_at(v[1])
-                else:
-                    chunk = data[pos:pos + frames]
-                    v[1] = pos + frames
-                    finished = v[1] >= len(data)
-                out[:len(chunk)] += chunk
-                if not finished:
-                    alive.append(v)
-            self.voices = alive
+            if not self.paused:  # พักอยู่ = ไม่แตะ voices เลย ตำแหน่งจึงค้างไว้ที่เดิม
+                alive = []
+                for v in self.voices:
+                    data, pos = v[0], v[1]
+                    if isinstance(data, StreamSource):
+                        chunk = data.read(pos, frames)  # ข้อมูลมาไม่ทัน = เงียบชั่วครู่ ไม่ข้ามเสียง
+                        v[1] = pos + len(chunk)
+                        finished = data.finished_at(v[1])
+                    else:
+                        chunk = data[pos:pos + frames]
+                        v[1] = pos + frames
+                        finished = v[1] >= len(data)
+                    out[:len(chunk)] += chunk
+                    if not finished:
+                        alive.append(v)
+                self.voices = alive
         out *= self.get_volume()
         if self.mic is not None:
             out += self.mic.read(frames)
@@ -331,6 +523,8 @@ class HotkeyManager:
         self.mods = set()
         self.down = set()
         self.enabled = True
+        # ถ้าตั้งไว้ คีย์ถัดไปจะส่งให้ฟังก์ชันนี้แทนการยิงปุ่มลัด (ใช้ตอนตั้งปุ่มลัด เพื่อให้เห็นคีย์แบบเดียวกับตอนใช้จริง)
+        self.capture = None
         self.listener = keyboard.Listener(on_press=self._press, on_release=self._release)
         self.listener.daemon = True
         self.listener.start()
@@ -351,9 +545,13 @@ class HotkeyManager:
         if vk in self.down:  # กดค้าง ไม่ยิงซ้ำ
             return
         self.down.add(vk)
+        mods = tuple(m for m in MOD_ORDER if m in self.mods)
+        if self.capture:
+            self.capture(mods, vk)
+            return
         if not self.enabled:
             return
-        cb = self.bindings.get((tuple(m for m in MOD_ORDER if m in self.mods), vk))
+        cb = self.bindings.get((mods, vk))
         if cb:
             cb()
 
@@ -370,42 +568,53 @@ class HotkeyManager:
 
 
 class HotkeyDialog(tk.Toplevel):
-    """หน้าต่างรับการกดคีย์เพื่อตั้งปุ่มลัด"""
+    """หน้าต่างรับการกดคีย์เพื่อตั้งปุ่มลัด
 
-    def __init__(self, parent, title):
+    รับคีย์ผ่าน HotkeyManager (ตัวเดียวกับที่ยิงปุ่มลัด) ไม่ใช้ event ของ Tk
+    คีย์ผสมที่ตั้งได้จึงตรงกับที่กดใช้จริงเสมอ เช่น Alt+1, Ctrl+Shift+F, Ctrl+Num5
+    """
+
+    def __init__(self, parent, title, hotkeys):
         super().__init__(parent)
+        style_window(self)
         self.title(title)
         self.resizable(False, False)
         self.transient(parent)
+        self.hotkeys = hotkeys
         self.result = None  # None = ยกเลิก, {} = ล้าง
         self.var = tk.StringVar(value="กดปุ่มที่ต้องการ...")
-        ttk.Label(self, textvariable=self.var, font=("Segoe UI", 14), padding=20).pack()
+        ttk.Label(self, textvariable=self.var, font=("Segoe UI", 14), padding=(20, 20, 20, 4)).pack()
+        self.hint = tk.StringVar(value="กดคีย์เดียว หรือกดค้าง Ctrl / Alt / Shift แล้วกดอีกปุ่ม\n"
+                                       "เช่น Alt+1, Ctrl+2, Ctrl+Shift+F, Num5   (Esc = ยกเลิก)")
+        ttk.Label(self, textvariable=self.hint, style="Muted.TLabel", justify="center",
+                  padding=(20, 0, 20, 12)).pack()
         bar = ttk.Frame(self, padding=(10, 0, 10, 10))
         bar.pack(fill="x")
         ttk.Button(bar, text="ล้างปุ่มลัด", command=self._clear).pack(side="left")
         ttk.Button(bar, text="ยกเลิก", command=self.destroy).pack(side="right")
-        self.bind("<KeyPress>", self._key)
+        self.bind("<KeyPress>", lambda e: "break")  # กันไม่ให้คีย์ไปกดปุ่มในหน้าต่าง
+        hotkeys.capture = lambda mods, vk: self.after(0, self._captured, mods, vk)
         self.grab_set()
         self.focus_force()
         self.geometry(f"+{parent.winfo_rootx() + 120}+{parent.winfo_rooty() + 120}")
 
-    def _key(self, e):
-        vk = e.keycode
-        if vk in MOD_VKS:
-            return "break"
+    def _captured(self, mods, vk):
+        if not self.winfo_exists():
+            return
         if vk == 0x1B:  # Esc = ยกเลิก
             self.destroy()
-            return "break"
-        mods = []
-        if e.state & 0x4:
-            mods.append("ctrl")
-        if e.state & 0x20000:
-            mods.append("alt")
-        if e.state & 0x1:
-            mods.append("shift")
-        self.result = {"mods": mods, "vk": vk}
+            return
+        if "win" in mods:
+            self.var.set("⚠ ใช้ปุ่ม Win ไม่ได้")
+            self.hint.set("Windows ใช้ Win+ปุ่มอยู่แล้ว (เช่น Win+1 เปิดแอปบน taskbar)\nลองใช้ Ctrl หรือ Alt แทน")
+            return
+        self.result = {"mods": list(mods), "vk": vk}
         self.destroy()
-        return "break"
+
+    def destroy(self):
+        if self.hotkeys.capture:
+            self.hotkeys.capture = None
+        super().destroy()
 
     def _clear(self):
         self.result = {}
@@ -554,79 +763,557 @@ def friendly_yt_error(e):
     return msg[:200]
 
 
-class YouTubeDialog(tk.Toplevel):
-    """หน้าต่างใส่ลิงก์ YouTube; ผลลัพธ์เก็บใน self.result = (url, name, start, end, mode)"""
+def fmt_time(sec):
+    """วินาที -> '1:23.4' (หรือ '1:02:03.4' ถ้าเกินชั่วโมง)"""
+    sec = round(max(0.0, sec), 1)
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    return f"{int(h)}:{int(m):02d}:{s:04.1f}" if h >= 1 else f"{int(m)}:{s:04.1f}"
 
-    def __init__(self, parent, on_update):
+
+class PreviewPlayer:
+    """เล่นเสียงตัวอย่างจาก YouTube ออกหูฟังอย่างเดียว (ไม่เข้าไมค์) ใช้ตอนเลือกช่วงตัด"""
+
+    PREBUFFER = 0.25  # วินาที
+
+    def __init__(self, device, get_volume):
+        self.mixer = OutputMixer(device, get_volume)
+        self.src = None
+        self.offset = 0.0  # เวลาในคลิปที่ตรงกับต้นของ src
+        self.gen = 0       # เพิ่มทุกครั้งที่หยุด เพื่อยกเลิกงานเชื่อมต่อที่ค้างอยู่
+        self.loading = False
+        self.lock = threading.Lock()
+
+    def play(self, page_url, start, end, on_error):
+        """เล่นช่วง start..end ของคลิป (end=None = ไปจนจบคลิป); เชื่อมต่อใน thread แยก"""
+        self.stop()
+        self.loading = True
+        gen = self.gen
+
+        def work():
+            src = None
+            try:
+                url, headers = youtube_stream_url(page_url)
+                if gen != self.gen:
+                    return
+                src = StreamSource(url, headers, self.mixer.sr, start or None, end)
+                deadline = time.time() + STREAM_TIMEOUT
+                while (gen == self.gen and time.time() < deadline and not src.done
+                       and src.n < src.sr * self.PREBUFFER):
+                    time.sleep(0.02)
+                if src.error:
+                    raise RuntimeError(src.error)
+                if src.n == 0 and not src.done and gen == self.gen:
+                    raise RuntimeError("เชื่อมต่อนานเกินไป ลองใหม่อีกครั้ง")
+                with self.lock:
+                    if gen != self.gen:
+                        src.stop()
+                        return
+                    self.mixer.stop_all()
+                    self.src, self.offset = src, start or 0.0
+                    self.mixer.play(src, 0)
+            except Exception as e:
+                if src:
+                    src.stop()
+                _stream_url_cache.pop(page_url, None)
+                if gen == self.gen:
+                    on_error(e)
+            finally:
+                if gen == self.gen:
+                    self.loading = False
+        threading.Thread(target=work, daemon=True).start()
+
+    def position(self):
+        """เวลาในคลิปที่ได้ยินอยู่ตอนนี้ (หักความหน่วงของลำโพงแล้ว) หรือ None ถ้าไม่ได้เล่น"""
+        with self.mixer.lock:
+            if not self.mixer.voices:
+                return None
+            pos = self.mixer.voices[0][1]
+        heard = pos / self.mixer.sr - (self.mixer.stream.latency or 0)
+        return self.offset + max(0.0, heard)
+
+    def playing(self):
+        return self.loading or self.position() is not None
+
+    def stop(self):
+        with self.lock:
+            self.gen += 1
+            self.mixer.stop_all()
+            if self.src:
+                self.src.stop()
+                self.src = None
+        self.loading = False
+
+    def close(self):
+        self.stop()
+        self.mixer.close()
+
+
+class RangeTimeline(tk.Canvas):
+    """หลอดเลือกช่วง 2 หมุด
+
+    ลากหมุดซ้าย/ขวา = เลื่อนจุดเริ่ม/จบ, ลากแถบสีระหว่างหมุด = ย้ายทั้งช่วง,
+    คลิกที่อื่นบนหลอด (หรือคลิกแถบสีโดยไม่ลาก) = ฟังจากจุดนั้น
+    """
+
+    PAD, HIT, MIN_LEN, TRACK_Y = 16, 9, 0.1, 40
+    # อ่านสีจากธีมตอนวาด จึงเปลี่ยนตามธีมมืด/สว่างได้
+    C_TRACK = property(lambda self: T["surface2"])
+    C_SEL = property(lambda self: T["purple"])
+    C_HANDLE = property(lambda self: T["pink"])
+    C_HEAD = property(lambda self: T["playhead"])
+    C_TEXT = property(lambda self: T["text"])
+    C_GRAY = property(lambda self: T["muted"])
+
+    def __init__(self, parent, on_change, on_release, on_seek, width=620, height=76):
+        super().__init__(parent, width=width, height=height, highlightthickness=0, bg=T["bg"])
+        self.on_change, self.on_release, self.on_seek = on_change, on_release, on_seek
+        self.duration = 0.0
+        self.start = self.end = 0.0
+        self.view = (0.0, 0.0)
+        self.playhead = None
+        self.drag = None  # (ชนิด, ค่าที่จำไว้, x ตอนกด)
+        self.bind("<Button-1>", self._press)
+        self.bind("<B1-Motion>", self._motion)
+        self.bind("<ButtonRelease-1>", self._release)
+        self.bind("<Motion>", self._hover)
+        self.bind("<Configure>", lambda e: self.redraw())
+
+    # ---- ค่า
+    def set_duration(self, d):
+        self.duration = max(0.0, float(d or 0))
+        self.start, self.end = 0.0, self.duration
+        self.view = (0.0, self.duration)
+        self.playhead = None
+        self.redraw()
+
+    def set_range(self, start, end):
+        if not self.duration:
+            return
+        start = max(0.0, min(start, self.duration - self.MIN_LEN))
+        end = max(start + self.MIN_LEN, min(end, self.duration))
+        self.start, self.end = start, end
+        self.redraw()
+
+    def set_playhead(self, t):
+        if t != self.playhead:
+            self.playhead = t
+            self.redraw()
+
+    @property
+    def zoomed(self):
+        return self.view != (0.0, self.duration)
+
+    def zoom_to_selection(self):
+        pad = max((self.end - self.start) * 0.5, 2.0)
+        self.view = (max(0.0, self.start - pad), min(self.duration, self.end + pad))
+        self.redraw()
+
+    def reset_zoom(self):
+        self.view = (0.0, self.duration)
+        self.redraw()
+
+    # ---- พิกัด
+    def _x(self, t):
+        v0, v1 = self.view
+        w = self.winfo_width() - 2 * self.PAD
+        return self.PAD + (t - v0) / max(v1 - v0, 1e-6) * w
+
+    def _t(self, x):
+        v0, v1 = self.view
+        w = self.winfo_width() - 2 * self.PAD
+        return max(0.0, min(self.duration, v0 + (x - self.PAD) / max(w, 1) * (v1 - v0)))
+
+    # ---- วาด
+    def redraw(self):
+        self.delete("all")
+        w, y = self.winfo_width(), self.TRACK_Y
+        if not self.duration:
+            self.create_rectangle(self.PAD, y - 3, w - self.PAD, y + 3, fill=self.C_TRACK, outline="")
+            self.create_text(w / 2, y + 22, text="วางลิงก์แล้วรอโหลดข้อมูลคลิป เพื่อเลือกช่วง", fill=self.C_GRAY)
+            return
+        v0, v1 = self.view
+        self.create_rectangle(self.PAD, y - 3, w - self.PAD, y + 3, fill=self.C_TRACK, outline="")
+        xs, xe = self._x(self.start), self._x(self.end)
+        lo, hi = max(xs, self.PAD), min(xe, w - self.PAD)
+        if hi > lo:
+            self.create_rectangle(lo, y - 7, hi, y + 7, fill=self.C_SEL, outline="")
+        for t, x, anchor in ((self.start, xs, "e"), (self.end, xe, "w")):
+            if v0 <= t <= v1:
+                self.create_rectangle(x - 4, y - 14, x + 4, y + 14, fill=self.C_HANDLE, outline="white")
+                self.create_text(x + (-7 if anchor == "e" else 7), y - 24, text=fmt_time(t),
+                                 anchor=anchor, fill=self.C_TEXT, font=("Segoe UI", 9, "bold"))
+        if self.playhead is not None and v0 <= self.playhead <= v1:
+            xp = self._x(self.playhead)
+            self.create_line(xp, y - 18, xp, y + 18, fill=self.C_HEAD, width=2)
+        self.create_text(self.PAD, y + 26, text=fmt_time(v0), anchor="w", fill=self.C_GRAY, font=("Segoe UI", 8))
+        self.create_text(w - self.PAD, y + 26, text=fmt_time(v1), anchor="e", fill=self.C_GRAY, font=("Segoe UI", 8))
+        if self.zoomed:
+            self.create_text(w / 2, y + 26, text="🔍 ซูมอยู่", fill=self.C_GRAY, font=("Segoe UI", 8))
+
+    # ---- เมาส์
+    def _hit(self, x, y):
+        xs, xe = self._x(self.start), self._x(self.end)
+        ds, de = abs(x - xs), abs(x - xe)
+        if min(ds, de) <= self.HIT:
+            return "start" if ds <= de else "end"
+        if xs < x < xe and abs(y - self.TRACK_Y) <= 12:
+            return "move"
+        return None
+
+    def _hover(self, e):
+        kind = self._hit(e.x, e.y) if self.duration else None
+        self.config(cursor={"start": "sb_h_double_arrow", "end": "sb_h_double_arrow",
+                            "move": "fleur"}.get(kind, "hand2" if self.duration else ""))
+
+    def _press(self, e):
+        self.focus_set()
+        if not self.duration:
+            return
+        kind = self._hit(e.x, e.y)
+        if kind == "move":
+            self.drag = ("move", self._t(e.x) - self.start, e.x)
+        elif kind:
+            self.drag = (kind, None, e.x)
+        else:
+            self.drag = None
+            self.on_seek(self._t(e.x))
+
+    def _motion(self, e):
+        if not self.drag:
+            return
+        kind, grab, _ = self.drag
+        t = self._t(e.x)
+        if kind == "start":
+            self.start = max(0.0, min(t, self.end - self.MIN_LEN))
+        elif kind == "end":
+            self.end = min(self.duration, max(t, self.start + self.MIN_LEN))
+        else:
+            length = self.end - self.start
+            self.start = max(0.0, min(t - grab, self.duration - length))
+            self.end = self.start + length
+        self.redraw()
+        self.on_change(self.start, self.end)
+
+    def _release(self, e):
+        if not self.drag:
+            return
+        kind, _, x0 = self.drag
+        self.drag = None
+        if kind == "move" and abs(e.x - x0) < 3:  # คลิกแถบสีเฉยๆ = ฟังจากจุดนั้น
+            self.on_seek(self._t(e.x))
+        else:
+            self.on_release(kind)
+
+
+class YouTubeDialog(tk.Toplevel):
+    """หน้าต่างใส่ลิงก์ YouTube + เลือกช่วงตัดด้วยหลอด 2 หมุด พร้อมฟังตัวอย่าง (ออกหูฟังอย่างเดียว)
+
+    ผลลัพธ์: self.result = (url, name, start, end, mode) โดย start/end = None คือไม่ตัดฝั่งนั้น
+    """
+
+    def __init__(self, parent, on_update, preview_device):
         super().__init__(parent)
+        style_window(self)
         self.title("ดึงเสียงจาก YouTube")
         self.resizable(False, False)
         self.transient(parent)
         self.result = None
+        self.duration = 0.0
+        self.info_url = None
+        self._fetch_after = self._tick_after = None
         self.v_url, self.v_name = tk.StringVar(), tk.StringVar()
         self.v_start, self.v_end = tk.StringVar(), tk.StringVar()
+        self.v_info, self.v_len, self.v_prev = tk.StringVar(), tk.StringVar(), tk.StringVar()
         self.v_mode = tk.StringVar(value="download")
+        self.v_pvol = tk.DoubleVar(value=70)
+        self.preview_vol = 0.7
+        self.v_pvol.trace_add("write", lambda *_: setattr(self, "preview_vol", self.v_pvol.get() / 100))
+        try:
+            self.player = PreviewPlayer(preview_device, lambda: self.preview_vol)
+        except Exception as e:
+            self.player = None
+            self.v_prev.set(f"⚠ เปิดหูฟังสำหรับฟังตัวอย่างไม่ได้: {e}")
 
         f = ttk.Frame(self, padding=12)
         f.pack(fill="both")
         ttk.Label(f, text="ลิงก์ YouTube").grid(row=0, column=0, sticky="w", pady=3)
-        url = ttk.Entry(f, textvariable=self.v_url, width=52)
-        url.grid(row=0, column=1, columnspan=3, sticky="ew", pady=3)
-        ttk.Label(f, text="ชื่อเสียง").grid(row=1, column=0, sticky="w", pady=3)
-        ttk.Entry(f, textvariable=self.v_name, width=52).grid(row=1, column=1, columnspan=3, sticky="ew", pady=3)
-        ttk.Label(f, text="(เว้นว่าง = ใช้ชื่อคลิป)", foreground="gray").grid(row=2, column=1, columnspan=3, sticky="w")
-        ttk.Label(f, text="ตัดช่วง").grid(row=3, column=0, sticky="w", pady=(8, 3))
-        ttk.Entry(f, textvariable=self.v_start, width=10).grid(row=3, column=1, sticky="w", pady=(8, 3))
-        ttk.Label(f, text="ถึง").grid(row=3, column=2, pady=(8, 3))
-        ttk.Entry(f, textvariable=self.v_end, width=10).grid(row=3, column=3, sticky="w", pady=(8, 3))
-        ttk.Label(f, text="เช่น 1:23 ถึง 1:30 (เว้นว่าง = ทั้งคลิป)", foreground="gray").grid(
-            row=4, column=1, columnspan=3, sticky="w")
-        ttk.Label(f, text="วิธีเล่น").grid(row=5, column=0, sticky="nw", pady=(8, 0))
+        self.url_entry = ttk.Entry(f, textvariable=self.v_url, width=70)
+        self.url_entry.grid(row=0, column=1, sticky="ew", pady=3)
+        ttk.Label(f, textvariable=self.v_info, style="Accent.TLabel").grid(row=1, column=1, sticky="w")
+        ttk.Label(f, text="ชื่อเสียง").grid(row=2, column=0, sticky="w", pady=3)
+        ttk.Entry(f, textvariable=self.v_name, width=70).grid(row=2, column=1, sticky="ew", pady=3)
+        ttk.Label(f, text="(เว้นว่าง = ใช้ชื่อคลิป)", style="Muted.TLabel").grid(row=3, column=1, sticky="w")
+
+        # ---- หลอดเลือกช่วง
+        ttk.Label(f, text="ช่วงที่ตัด").grid(row=4, column=0, sticky="nw", pady=(12, 0))
+        self.timeline = RangeTimeline(f, self._on_drag, self._on_drag_release, self._seek)
+        self.timeline.grid(row=4, column=1, sticky="ew", pady=(8, 0))
+        info_row = ttk.Frame(f)
+        info_row.grid(row=5, column=1, sticky="ew")
+        ttk.Label(info_row, textvariable=self.v_len, font=("Segoe UI", 10, "bold")).pack(side="left")
+        self.btn_zoom = ttk.Button(info_row, text="🔍 ซูมเข้าช่วงที่เลือก", command=self._toggle_zoom)
+        self.btn_zoom.pack(side="right")
+
+        for row, label, which in ((6, "เริ่ม", "start"), (7, "จบ", "end")):
+            ttk.Label(f, text=label).grid(row=row, column=0, sticky="w", pady=2)
+            r = ttk.Frame(f)
+            r.grid(row=row, column=1, sticky="w", pady=2)
+            var = self.v_start if which == "start" else self.v_end
+            ent = ttk.Entry(r, textvariable=var, width=10, justify="center")
+            ent.pack(side="left")
+            ent.bind("<Return>", lambda e: (self._commit_entries(), "break")[1])
+            ent.bind("<FocusOut>", lambda e: self._commit_entries())
+            for d in (-1, -0.1, 0.1, 1):
+                ttk.Button(r, text=f"{d:+g}s", width=5,
+                           command=lambda w=which, d=d: self._nudge(w, d)).pack(side="left", padx=(4 if d == -1 else 1, 0))
+            key = "[" if which == "start" else "]"
+            ttk.Button(r, text=f"ตั้งจากเสียงที่ได้ยินอยู่  ( {key} )",
+                       command=lambda w=which: self._mark(w)).pack(side="left", padx=(10, 0))
+
+        # ---- ฟังตัวอย่าง
+        ttk.Label(f, text="ฟังตัวอย่าง").grid(row=8, column=0, sticky="w", pady=(10, 2))
+        p = ttk.Frame(f)
+        p.grid(row=8, column=1, sticky="w", pady=(10, 2))
+        ttk.Button(p, text="▶ ฟังช่วงที่เลือก", style="Purple.TButton", command=self._play_range).pack(side="left")
+        ttk.Button(p, text="⏮ 3 วิแรก", command=self._play_head).pack(side="left", padx=(4, 0))
+        ttk.Button(p, text="⏭ 3 วิสุดท้าย", command=self._play_tail).pack(side="left", padx=(4, 0))
+        ttk.Button(p, text="■ หยุดฟัง", command=self._stop_preview).pack(side="left", padx=(4, 0))
+        ttk.Label(p, text="🔊").pack(side="left", padx=(12, 2))
+        ttk.Scale(p, from_=0, to=150, variable=self.v_pvol, length=90).pack(side="left")
+        self.v_pvol_txt = tk.StringVar(value="70%")
+        self.v_pvol.trace_add("write", lambda *_: self.v_pvol_txt.set(f"{round(self.v_pvol.get())}%"))
+        ttk.Label(p, textvariable=self.v_pvol_txt, width=5).pack(side="left", padx=(2, 0))
+        ttk.Label(f, textvariable=self.v_prev, style="Accent.TLabel").grid(row=9, column=1, sticky="w")
+        ttk.Label(f, text="คลิกบนหลอด = ฟังจากจุดนั้น • Space = ฟัง/หยุด • [ ] = ตั้งจุดเริ่ม/จบตอนที่ได้ยิน"
+                          "\nเสียงตัวอย่างออกหูฟังคุณอย่างเดียว เพื่อนไม่ได้ยิน",
+                  style="Muted.TLabel").grid(row=10, column=1, sticky="w")
+
+        ttk.Label(f, text="วิธีเล่น").grid(row=11, column=0, sticky="nw", pady=(10, 0))
         modes = ttk.Frame(f)
-        modes.grid(row=5, column=1, columnspan=3, sticky="w", pady=(8, 0))
+        modes.grid(row=11, column=1, sticky="w", pady=(10, 0))
         ttk.Radiobutton(modes, text="ดาวน์โหลดเก็บไว้ — กดแล้วออกทันที", value="download",
                         variable=self.v_mode, command=self._mode_changed).pack(anchor="w")
-        ttk.Radiobutton(modes, text="🌐 สตรีม (ไม่เก็บไฟล์) — ต้องมีเน็ต รอ 1-3 วิก่อนเสียงออก", value="stream",
+        ttk.Radiobutton(modes, text="🌐 สตรีม (ไม่เก็บไฟล์) — ต้องมีเน็ต รอ 1-2 วิก่อนเสียงออก", value="stream",
                         variable=self.v_mode, command=self._mode_changed).pack(anchor="w")
 
         bar = ttk.Frame(self, padding=(12, 0, 12, 12))
         bar.pack(fill="x")
-        self.btn_ok = ttk.Button(bar, text="⬇ ดาวน์โหลด", command=self._ok)
+        self.btn_ok = ttk.Button(bar, text="⬇ ดาวน์โหลด", style="Pink.TButton", command=self._ok)
         self.btn_ok.pack(side="right")
         ttk.Button(bar, text="ยกเลิก", command=self.destroy).pack(side="right", padx=6)
         ttk.Button(bar, text="⬆ อัปเดตตัวโหลด", command=lambda: (on_update(), self.destroy())).pack(side="left")
 
+        self.v_url.trace_add("write", lambda *_: self._schedule_fetch())
         try:  # วางลิงก์จาก clipboard ให้อัตโนมัติ
             clip = self.clipboard_get().strip()
             if YT_URL_RE.match(clip):
                 self.v_url.set(clip)
         except tk.TclError:
             pass
-        url.focus_set()
-        url.select_range(0, "end")
+        self.url_entry.focus_set()
+        self.url_entry.select_range(0, "end")
         self.bind("<Return>", lambda e: self._ok())
         self.bind("<Escape>", lambda e: self.destroy())
+        self.bind("<space>", lambda e: self._key(self._toggle_preview))
+        self.bind("<bracketleft>", lambda e: self._key(lambda: self._mark("start")))
+        self.bind("<bracketright>", lambda e: self._key(lambda: self._mark("end")))
+        self._update_len()
         self.grab_set()
-        self.geometry(f"+{parent.winfo_rootx() + 80}+{parent.winfo_rooty() + 80}")
+        self.geometry(f"+{parent.winfo_rootx() + 60}+{parent.winfo_rooty() + 40}")
+        self._tick()
 
+    # ---- โหลดข้อมูลคลิป
+    def _schedule_fetch(self):
+        if self._fetch_after:
+            self.after_cancel(self._fetch_after)
+        self._fetch_after = self.after(400, self._fetch_info)
+
+    def _fetch_info(self):
+        self._fetch_after = None
+        url = self.v_url.get().strip()
+        if url == self.info_url:
+            return
+        if self.player:
+            self.player.stop()
+        self.info_url, self.duration = None, 0.0
+        self.timeline.set_duration(0)
+        self.v_start.set(""), self.v_end.set("")
+        self._update_len()
+        if not YT_URL_RE.match(url):
+            self.v_info.set("")
+            return
+        self.v_info.set("🔎 กำลังโหลดข้อมูลคลิป...")
+
+        def work():
+            try:
+                info = youtube_info(url)
+                self.after(0, self._info_loaded, url, info, None)
+            except Exception as e:
+                self.after(0, self._info_loaded, url, None, e)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _info_loaded(self, url, info, err):
+        if not self.winfo_exists() or url != self.v_url.get().strip():
+            return  # ลิงก์เปลี่ยนไปแล้ว
+        if err:
+            self.v_info.set("⚠ " + friendly_yt_error(err))
+            return
+        if info.get("is_live") or info.get("live_status") in ("is_live", "is_upcoming"):
+            self.v_info.set("⚠ ไลฟ์สดโหลดไม่ได้")
+            return
+        self.info_url = url
+        self.duration = float(info.get("duration") or 0)
+        self.v_info.set(f"🎵 {info.get('title', '')}  —  ยาว {fmt_time(self.duration)}")
+        self.timeline.set_duration(self.duration)
+        self.btn_zoom.config(text="🔍 ซูมเข้าช่วงที่เลือก")
+        self._sync_from_timeline()
+        if self.focus_get() is self.url_entry:
+            self.timeline.focus_set()  # ให้ Space / [ ] ใช้ได้ทันที
+
+    # ---- ช่วงที่เลือก
+    def _ready(self):
+        return self.duration > 0
+
+    def _sync_from_timeline(self):
+        self.v_start.set(fmt_time(self.timeline.start))
+        self.v_end.set(fmt_time(self.timeline.end))
+        self._update_len()
+
+    def _update_len(self):
+        if self._ready():
+            self.v_len.set(f"ความยาวช่วง {self.timeline.end - self.timeline.start:.1f} วินาที")
+        else:
+            self.v_len.set("")
+
+    def _on_drag(self, start, end):
+        self._sync_from_timeline()
+
+    def _on_drag_release(self, kind):
+        if kind == "end":
+            self._play_tail()
+        else:
+            self._play_range()
+
+    def _commit_entries(self):
+        if not self._ready():
+            return
+        try:
+            s, e = parse_time(self.v_start.get()), parse_time(self.v_end.get())
+        except ValueError:
+            s = e = None
+        self.timeline.set_range(self.timeline.start if s is None else s, self.timeline.end if e is None else e)
+        self._sync_from_timeline()
+
+    def _nudge(self, which, delta):
+        if not self._ready():
+            return
+        tl = self.timeline
+        if which == "start":
+            tl.set_range(tl.start + delta, tl.end)
+        else:
+            tl.set_range(tl.start, tl.end + delta)
+        self._sync_from_timeline()
+
+    def _mark(self, which):
+        if not self._ready():
+            return
+        t = self.player.position() if self.player else None
+        if t is None:
+            self.v_prev.set("กดฟังก่อน แล้วค่อยกด [ หรือ ] ตอนที่ได้ยินท่อนที่ต้องการ")
+            return
+        tl = self.timeline
+        if which == "start":
+            tl.set_range(t, max(tl.end, t + tl.MIN_LEN))
+        else:
+            tl.set_range(min(tl.start, t - tl.MIN_LEN), t)
+        self._sync_from_timeline()
+
+    def _toggle_zoom(self):
+        if not self._ready():
+            return
+        if self.timeline.zoomed:
+            self.timeline.reset_zoom()
+            self.btn_zoom.config(text="🔍 ซูมเข้าช่วงที่เลือก")
+        else:
+            self.timeline.zoom_to_selection()
+            self.btn_zoom.config(text="↔ ดูทั้งคลิป")
+
+    # ---- ฟังตัวอย่าง
+    def _preview(self, start, end):
+        if not self._ready() or not self.player:
+            return
+        self.v_prev.set("⏳ กำลังโหลดเสียงตัวอย่าง...")
+        self.player.play(self.info_url, start, end,
+                         lambda e: self.after(0, self.v_prev.set, "⚠ ฟังตัวอย่างไม่ได้: " + friendly_yt_error(e)))
+
+    def _play_range(self):
+        self._preview(self.timeline.start, self.timeline.end)
+
+    def _play_head(self):
+        self._preview(self.timeline.start, min(self.timeline.start + 3, self.timeline.end))
+
+    def _play_tail(self):
+        self._preview(max(self.timeline.start, self.timeline.end - 3), self.timeline.end)
+
+    def _seek(self, t):
+        self._preview(t, None)  # ฟังต่อไปเรื่อยๆ จนกดหยุด
+
+    def _stop_preview(self):
+        if self.player:
+            self.player.stop()
+
+    def _toggle_preview(self):
+        if self.player and self.player.playing():
+            self.player.stop()
+        else:
+            self._play_range()
+
+    def _key(self, action):
+        """Space / [ / ] ใช้ได้เมื่อไม่ได้พิมพ์อยู่ในช่องข้อความ"""
+        if isinstance(self.focus_get(), (ttk.Entry, tk.Entry, ttk.Spinbox)):
+            return None
+        action()
+        return "break"
+
+    def _tick(self):
+        if self.player:
+            pos = self.player.position()
+            self.timeline.set_playhead(pos)
+            msg = self.v_prev.get()
+            if pos is not None:
+                self.v_prev.set(f"🔊 กำลังฟัง {fmt_time(pos)}")
+            elif not self.player.loading and msg.startswith(("⏳", "🔊")):
+                self.v_prev.set("")
+        self._tick_after = self.after(50, self._tick)
+
+    # ---- ปิด
     def _ok(self):
         url = self.v_url.get().strip()
         if not YT_URL_RE.match(url):
             messagebox.showwarning("ลิงก์ไม่ถูกต้อง", "ใส่ลิงก์ youtube.com หรือ youtu.be", parent=self)
             return
-        try:
-            start, end = parse_time(self.v_start.get()), parse_time(self.v_end.get())
-        except ValueError as e:
-            messagebox.showwarning("เวลาไม่ถูกต้อง", f"รูปแบบเวลาไม่ถูกต้อง: {e}\nใช้แบบ 83 หรือ 1:23", parent=self)
-            return
-        if start is not None and end is not None and end <= start:
-            messagebox.showwarning("เวลาไม่ถูกต้อง", "เวลาจบต้องมากกว่าเวลาเริ่ม", parent=self)
-            return
+        if self._ready():
+            self._commit_entries()
+            start, end = self.timeline.start, self.timeline.end
+            start = None if start < 0.05 else round(start, 2)
+            end = None if end > self.duration - 0.05 else round(end, 2)
+        else:
+            start = end = None  # ยังโหลดข้อมูลคลิปไม่เสร็จ = เอาทั้งคลิป
         self.result = (url, self.v_name.get().strip(), start, end, self.v_mode.get())
         self.destroy()
 
     def _mode_changed(self):
         self.btn_ok.config(text="🌐 เพิ่มแบบสตรีม" if self.v_mode.get() == "stream" else "⬇ ดาวน์โหลด")
+
+    def destroy(self):
+        for a in (self._fetch_after, self._tick_after):
+            if a:
+                self.after_cancel(a)
+        if self.player:
+            self.player.close()
+            self.player = None
+        super().destroy()
 
 
 # ---------------------------------------------------------------- app
@@ -647,12 +1334,8 @@ class SoundpadApp:
     def __init__(self, root):
         self.root = root
         root.title(f"{APP_NAME} {APP_VERSION}")
-        try:
-            root.iconbitmap(os.path.join(RES_DIR, "icon.ico"))
-        except tk.TclError:
-            pass
-        root.geometry("820x620")
-        root.minsize(700, 500)
+        set_app_icon(root)
+        root.geometry("980x720")  # ปรับอีกครั้งหลังสร้างหน้าจอ ให้พอดีกับเนื้อหาจริง
 
         self.sounds = []  # {"id","path","name","hotkey"}
         self.next_id = 1
@@ -662,6 +1345,7 @@ class SoundpadApp:
         self.streams = []  # StreamSource ที่ ffmpeg ยังทำงานอยู่
         self.stream_lock = threading.Lock()
         self.stream_gen = 0  # เพิ่มทุกครั้งที่กดหยุด เพื่อยกเลิกสตรีมที่ยังเชื่อมต่อไม่เสร็จ
+        self.paused = False
 
         self.v_monitor_vol = tk.DoubleVar(value=70)
         self.v_cable_vol = tk.DoubleVar(value=70)
@@ -671,6 +1355,7 @@ class SoundpadApp:
         self.v_passthrough = tk.BooleanVar(value=True)
         self.v_stop_prev = tk.BooleanVar(value=True)
         self.v_hotkeys_on = tk.BooleanVar(value=True)
+        self.v_theme = tk.StringVar(value="dark")
         self.v_search = tk.StringVar()
         self.v_status = tk.StringVar(value="พร้อม")
         self.stop_hotkey = {"mods": [], "vk": 0x13}  # Pause
@@ -681,12 +1366,19 @@ class SoundpadApp:
 
         self.hotkeys = HotkeyManager()
         self._load()
+        use_theme(self.v_theme.get())  # ธีมที่บันทึกไว้ (ค่าเริ่มต้น = มืด)
+        apply_theme(root)
+        style_window(root)
         # audio callback อ่านค่าจาก dict นี้แทน tk.Variable (tk ไม่ thread-safe)
         self.vol = {}
         for key, var in (("monitor", self.v_monitor_vol), ("cable", self.v_cable_vol), ("mic", self.v_mic_vol)):
             self.vol[key] = var.get() / 100
             var.trace_add("write", lambda *_, k=key, v=var: self.vol.__setitem__(k, v.get() / 100))
         self._build_ui()
+        root.update_idletasks()
+        need_w, need_h = root.winfo_reqwidth(), root.winfo_reqheight()
+        root.minsize(need_w, min(need_h, 640))
+        root.geometry(f"{max(980, need_w)}x{max(720, need_h)}")
         self._refresh_list()
         self._apply_devices()
         self._rebind_hotkeys()
@@ -695,12 +1387,20 @@ class SoundpadApp:
 
     # ---------- UI
     def _build_ui(self):
-        style = ttk.Style()
-        style.configure(".", font=("Segoe UI", 10))
-        style.configure("Treeview", rowheight=26)
-        style.configure("Big.TButton", font=("Segoe UI", 10, "bold"))
+        # ---- หัวแอป: โลโก้ + ชื่อ
+        head = ttk.Frame(self.root, padding=(12, 10, 12, 2))
+        head.pack(fill="x")
+        logo = find_resource("icon.png")
+        if logo:
+            self._logo = tk.PhotoImage(file=logo).subsample(8)  # 256 -> 32 px (เก็บ ref กันโดนเก็บขยะ)
+            ttk.Label(head, image=self._logo).pack(side="left", padx=(0, 8))
+        ttk.Label(head, text=APP_NAME, style="Brand.TLabel").pack(side="left")
+        self.btn_theme = ttk.Button(head, command=self.toggle_theme)
+        self.btn_theme.pack(side="right")
+        self._update_theme_button()
+        ttk.Label(head, text=f"v{APP_VERSION}", style="Muted.TLabel").pack(side="left", padx=(6, 0), pady=(6, 0))
 
-        top = ttk.Frame(self.root, padding=(8, 8, 8, 4))
+        top = ttk.Frame(self.root, padding=(12, 8, 12, 4))
         top.pack(fill="x")
         ttk.Button(top, text="➕ เพิ่มไฟล์", command=self.add_files).pack(side="left")
         ttk.Button(top, text="📁 เพิ่มโฟลเดอร์", command=self.add_folder).pack(side="left", padx=4)
@@ -709,14 +1409,28 @@ class SoundpadApp:
         ttk.Button(top, text="⌨ ตั้งปุ่มลัด", command=self.set_hotkey).pack(side="left")
         ttk.Button(top, text="✏ เปลี่ยนชื่อ", command=self.rename).pack(side="left", padx=4)
         ttk.Button(top, text="🗑 ลบ", command=self.remove).pack(side="left")
-        ttk.Button(top, text="▶ เล่น", style="Big.TButton", command=self.play_selected).pack(side="left", padx=(16, 4))
-        ttk.Button(top, text="■ หยุด", style="Big.TButton", command=self.stop_all).pack(side="left")
-        ttk.Label(top, text="ค้นหา").pack(side="right", padx=(4, 0))
-        search = ttk.Entry(top, textvariable=self.v_search, width=20)
-        search.pack(side="right")
-        self.v_search.trace_add("write", lambda *_: self._refresh_list())
+        ttk.Button(top, text="▶ เล่น", style="Pink.TButton", command=self.play_selected).pack(side="left", padx=(16, 4))
+        self.btn_pause = ttk.Button(top, text="⏸ พัก", style="Purple.TButton", width=9, command=self.toggle_pause)
+        self.btn_pause.pack(side="left")
+        ttk.Button(top, text="■ หยุด", style="Big.TButton", command=self.stop_all).pack(side="left", padx=(4, 0))
 
-        mid = ttk.Frame(self.root, padding=(8, 0))
+        # ---- ค้นหา: แถวของตัวเอง กว้างเต็มหน้าต่าง
+        bar = ttk.Frame(self.root, padding=(12, 4, 12, 8))
+        bar.pack(fill="x")
+        ttk.Label(bar, text="🔍", font=(FONT, 13)).pack(side="left")
+        self.search_entry = ttk.Entry(bar, textvariable=self.v_search, font=(FONT, 12))
+        self.search_entry.pack(side="left", fill="x", expand=True, padx=6, ipady=4)
+        ttk.Button(bar, text="✕ ล้าง", command=self._clear_search).pack(side="left")
+        self.v_count = tk.StringVar()
+        ttk.Label(bar, textvariable=self.v_count, style="Muted.TLabel", width=14, anchor="e").pack(side="left")
+        self.v_search.trace_add("write", lambda *_: self._refresh_list())
+        self.search_entry.bind("<Escape>", lambda e: self._clear_search())
+        self.search_entry.bind("<Return>", lambda e: self._focus_first_result())
+        self.search_entry.bind("<Down>", lambda e: self._focus_first_result())
+        self.root.bind("<Control-f>", lambda e: (self.search_entry.focus_set(),
+                                                 self.search_entry.select_range(0, "end")))
+
+        mid = ttk.Frame(self.root, padding=(12, 0))
         mid.pack(fill="both", expand=True)
         cols = ("no", "name", "hotkey", "length")
         self.tree = ttk.Treeview(mid, columns=cols, show="headings", selectmode="extended")
@@ -724,7 +1438,7 @@ class SoundpadApp:
                                    ("hotkey", "ปุ่มลัด", 150, "center"), ("length", "ความยาว", 80, "center")]:
             self.tree.heading(c, text=text)
             self.tree.column(c, width=w, anchor=anchor, stretch=(c == "name"))
-        self.tree.tag_configure("playing", background="#d6f5d6")
+        self._style_tree_tags()
         sb = ttk.Scrollbar(mid, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -732,9 +1446,10 @@ class SoundpadApp:
         self.tree.bind("<Double-1>", lambda e: self.play_selected())
         self.tree.bind("<Return>", lambda e: self.play_selected())
         self.tree.bind("<Delete>", lambda e: self.remove())
+        self.tree.bind("<space>", lambda e: (self.toggle_pause(), "break")[1])
 
         # ---- settings
-        bottom = ttk.Frame(self.root, padding=8)
+        bottom = ttk.Frame(self.root, padding=(12, 10, 12, 10))
         bottom.pack(fill="x")
 
         dev = ttk.LabelFrame(bottom, text="อุปกรณ์เสียง", padding=8)
@@ -764,8 +1479,17 @@ class SoundpadApp:
         self.btn_stop_hk.grid(row=6, column=1, sticky="e")
         self._update_stop_btn()
 
-        ttk.Label(self.root, textvariable=self.v_status, relief="sunken", anchor="w",
-                  padding=(6, 2)).pack(fill="x", side="bottom")
+        # ---- แถบสถานะ: ป้ายสี + ข้อความสี + เส้นสีด้านบน เปลี่ยนตามสถานะ
+        sbar = ttk.Frame(self.root, style="StatusBar.TFrame")
+        sbar.pack(fill="x", side="bottom")
+        self.status_line = ttk.Frame(self.root, height=2)
+        self.status_line.pack(fill="x", side="bottom")
+        self.status_badge = ttk.Label(sbar, width=11)
+        self.status_badge.pack(side="left", padx=(10, 8), pady=6)
+        self.status_text = ttk.Label(sbar, textvariable=self.v_status, anchor="w")
+        self.status_text.pack(side="left", fill="x", expand=True)
+        self.v_status.trace_add("write", lambda *_: self._update_status_style())
+        self._update_status_style()
 
     def _device_combo(self, parent, row, label, devs, key, default_idx):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=3)
@@ -785,6 +1509,24 @@ class SoundpadApp:
     def _slider(self, parent, row, label, var):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w")
         ttk.Scale(parent, from_=0, to=150, variable=var, length=150).grid(row=row, column=1, padx=4)
+        # ช่องตัวเลข %: ขยับตามแถบเลื่อน และพิมพ์ค่า/กดลูกศรเองได้ (Enter หรือคลิกออกเพื่อใช้ค่า)
+        text = tk.StringVar(value=str(round(var.get())))
+        box = ttk.Spinbox(parent, from_=0, to=150, increment=5, width=4, textvariable=text, justify="right")
+        box.grid(row=row, column=2)
+        ttk.Label(parent, text="%").grid(row=row, column=3, sticky="w", padx=(1, 0))
+        var.trace_add("write", lambda *_: text.set(str(round(var.get()))))
+
+        def commit(_=None):
+            try:
+                v = float(text.get().strip().rstrip("%"))
+            except ValueError:
+                v = var.get()
+            v = max(0.0, min(150.0, v))
+            var.set(v)
+            text.set(str(round(v)))
+        box.configure(command=commit)
+        box.bind("<Return>", commit)
+        box.bind("<FocusOut>", commit)
 
     def _find_cable(self):
         # หา VB-CABLE โดยเลือก MME ก่อน (เข้ากันได้ดีที่สุด)
@@ -833,6 +1575,7 @@ class SoundpadApp:
                 self.cable = OutputMixer(cab_idx, lambda: self.vol["cable"], self.mic)
             except Exception as e:
                 errors.append(f"ไมค์เสมือน: {e}")
+        self._set_paused(False, quiet=True)  # mixer ใหม่ยังไม่มีเสียงค้าง
 
         if errors:
             self.v_status.set("⚠ " + " | ".join(errors))
@@ -873,7 +1616,11 @@ class SoundpadApp:
             messagebox.showerror("ยังไม่ได้ติดตั้ง", "ต้องติดตั้งก่อน: pip install yt-dlp imageio-ffmpeg\n"
                                                      "(หรือเปิดโปรแกรมผ่าน run_soundpad.bat / ตัวติดตั้ง)")
             return
-        dlg = YouTubeDialog(self.root, self.update_ytdlp)
+        # เสียงตัวอย่างออกหูฟังที่เลือกไว้ (ไม่ใช่ไมค์เสมือน) เพื่อนจึงไม่ได้ยินตอนตัดเพลง
+        preview_dev = self._dev_index(self.cb_monitor, self.out_devs)
+        if preview_dev is None:
+            preview_dev = sd.default.device[1]
+        dlg = YouTubeDialog(self.root, self.update_ytdlp, preview_dev)
         self.root.wait_window(dlg)
         if not dlg.result:
             return
@@ -988,6 +1735,7 @@ class SoundpadApp:
             return
         s = sel[0]
         win = tk.Toplevel(self.root)
+        style_window(win)
         win.title("เปลี่ยนชื่อ")
         win.transient(self.root)
         var = tk.StringVar(value=s["name"])
@@ -1008,7 +1756,7 @@ class SoundpadApp:
 
     def _ask_hotkey(self, title):
         self.hotkeys.enabled = False
-        dlg = HotkeyDialog(self.root, title)
+        dlg = HotkeyDialog(self.root, title, self.hotkeys)
         self.root.wait_window(dlg)
         self.hotkeys.enabled = self.v_hotkeys_on.get()
         return dlg.result
@@ -1077,6 +1825,7 @@ class SoundpadApp:
             return
         if self.v_stop_prev.get():
             self.stop_all()
+        self._set_paused(False, quiet=True)  # กดเล่นเสียงใหม่ระหว่างพัก = เลิกพัก
         try:
             for m in self._targets():
                 m.play(load_audio(s["path"], m.sr), sid)
@@ -1128,9 +1877,24 @@ class SoundpadApp:
             for src in sources.values():
                 src.stop()
             return
+        self._set_paused(False, quiet=True)
         for m in targets:
             m.play(sources[m.sr], s["id"])
         self.v_status.set(f"▶ กำลังเล่น: {s['name']}")
+
+    def toggle_pause(self):
+        playing = any(m.playing_ids() for m in (self.monitor, self.cable) if m)
+        if playing or self.paused:
+            self._set_paused(not self.paused)
+
+    def _set_paused(self, paused, quiet=False):
+        self.paused = paused
+        for m in (self.monitor, self.cable):
+            if m:
+                m.paused = paused
+        self.btn_pause.config(text="▶ เล่นต่อ" if paused else "⏸ พัก")
+        if not quiet:
+            self.v_status.set("⏸ พักไว้ — กด ▶ เล่นต่อ หรือ Space" if paused else "▶ เล่นต่อ")
 
     def stop_all(self):
         self.stream_gen += 1  # ยกเลิกสตรีมที่กำลังเชื่อมต่อ
@@ -1141,8 +1905,9 @@ class SoundpadApp:
         for m in (self.monitor, self.cable):
             if m:
                 m.stop_all()
-        if self.v_status.get().startswith("⏳"):
-            self.v_status.set("■ ยกเลิกการเชื่อมต่อ")
+        self._set_paused(False, quiet=True)
+        if self.v_status.get().startswith(("⏳", "⏸")):
+            self.v_status.set("■ หยุดแล้ว")
 
     # ---------- list
     def _refresh_list(self):
@@ -1165,14 +1930,61 @@ class SoundpadApp:
         keep = [i for i in sel if self.tree.exists(i)]
         if keep:
             self.tree.selection_set(keep)
+        shown, total = len(self.tree.get_children()), len(self.sounds)
+        self.v_count.set(f"{shown}/{total} เสียง" if q else f"{total} เสียง")
+
+    def toggle_theme(self):
+        self.v_theme.set("light" if self.v_theme.get() == "dark" else "dark")
+        use_theme(self.v_theme.get())
+        apply_theme(self.root)
+        style_window(self.root)
+        self._style_tree_tags()
+        self._update_status_style()
+        self._update_theme_button()
+        for cb in (self.cb_monitor, self.cb_cable, self.cb_mic):  # รายการ dropdown ที่สร้างไปแล้ว
+            try:
+                lb = f"{self.root.tk.call('ttk::combobox::PopdownWindow', cb)}.f.l"
+                self.root.tk.call(lb, "configure", "-background", T["surface2"], "-foreground", T["text"],
+                                  "-selectbackground", T["sel"], "-selectforeground", "#ffffff")
+            except tk.TclError:
+                pass
+        self._save()
+
+    def _update_theme_button(self):
+        dark = self.v_theme.get() == "dark"
+        self.btn_theme.config(text="☀ ธีมสว่าง" if dark else "🌙 ธีมมืด")
+
+    def _style_tree_tags(self):
+        self.tree.tag_configure("playing", background=T["playing"], foreground=T["playing_fg"])
+        self.tree.tag_configure("paused", background=T["paused"], foreground=T["warn"])
+
+    def _update_status_style(self):
+        kind = status_kind(self.v_status.get())
+        self.status_badge.config(text=STATUS_LABELS[kind], style=f"Badge.{kind}.TLabel")
+        self.status_text.config(style=f"StatusText.{kind}.TLabel")
+        self.status_line.config(style=f"Line.{kind}.TFrame")
+
+    def _clear_search(self):
+        self.v_search.set("")
+        self.search_entry.focus_set()
+
+    def _focus_first_result(self):
+        items = self.tree.get_children()
+        if items:
+            self.tree.focus_set()
+            self.tree.selection_set(items[0])
+            self.tree.focus(items[0])
+            self.tree.see(items[0])
+        return "break"
 
     def _tick(self):
         playing = set()
         for m in (self.monitor, self.cable):
             if m:
                 playing.update(m.playing_ids())
+        tag = ("paused",) if self.paused else ("playing",)
         for iid in self.tree.get_children():
-            self.tree.item(iid, tags=("playing",) if int(iid) in playing else ())
+            self.tree.item(iid, tags=tag if int(iid) in playing else ())
         if not playing and self.v_status.get().startswith("▶"):
             self.v_status.set("พร้อม")
         with self.stream_lock:  # สตรีมที่ ffmpeg จบแล้ว ไม่ต้องติดตามต่อ
@@ -1204,7 +2016,7 @@ class SoundpadApp:
     def _setting_vars(self):
         return {"monitor_vol": self.v_monitor_vol, "cable_vol": self.v_cable_vol, "mic_vol": self.v_mic_vol,
                 "to_me": self.v_to_me, "to_mic": self.v_to_mic, "passthrough": self.v_passthrough,
-                "stop_prev": self.v_stop_prev}
+                "stop_prev": self.v_stop_prev, "theme": self.v_theme}
 
     @staticmethod
     def _sound_record(s):
