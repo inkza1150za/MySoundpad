@@ -26,7 +26,7 @@ import soundfile as sf
 from pynput import keyboard
 
 APP_NAME = "MySoundpad"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 FROZEN = getattr(sys, "frozen", False)  # True เมื่อรันจาก .exe (PyInstaller)
 APP_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 RES_DIR = getattr(sys, "_MEIPASS", APP_DIR)  # ไฟล์ที่แพ็กมากับ exe เช่น icon

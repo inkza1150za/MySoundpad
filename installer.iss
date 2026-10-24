@@ -8,7 +8,7 @@
 ;   /cableurl=URL   เปลี่ยนลิงก์ดาวน์โหลด (ใช้ทดสอบกรณีโหลดไม่ได้)
 
 #define MyAppName "MySoundpad"
-#define MyAppVersion "1.2.0"
+#define MyAppVersion "1.3.0"
 #define MyAppExe "MySoundpad.exe"
 #define CableUrl "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip"
 #define CablePage "https://vb-audio.com/Cable/"
