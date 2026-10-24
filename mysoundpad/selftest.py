@@ -87,5 +87,24 @@ def selftest(out_path):
         return f"recorded peak {peak:.3f}" if peak > 0.2 else 1 / 0
     check("play into CABLE", cable_loop)
 
+    def drag_and_drop():
+        from tkinterdnd2 import TkinterDnD
+        r = TkinterDnD.Tk()
+        r.withdraw()
+        version = r.tk.call("package", "require", "tkdnd")
+        r.destroy()
+        return f"tkdnd {version}"
+    check("drag & drop", drag_and_drop)
+
+    def voice_changer():
+        from .voicefx import VoiceFX
+        sr = 44100
+        x = (0.4 * np.sin(np.arange(sr) * 2 * np.pi * 220 / sr)).astype(np.float32)
+        fx = VoiceFX(sr, "pitch_up", 0.6)
+        y = np.concatenate([fx.process(x[i:i + 512]) for i in range(0, sr - 512, 512)])[sr // 4:]
+        peak = np.fft.rfftfreq(len(y), 1 / sr)[np.argmax(np.abs(np.fft.rfft(y)))]
+        return f"220 Hz -> {peak:.0f} Hz" if peak > 280 else 1 / 0
+    check("voice changer", voice_changer)
+
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")

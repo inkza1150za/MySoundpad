@@ -51,6 +51,8 @@ class HotkeyManager:
 
     def __init__(self):
         self.bindings = {}
+        self.release_bindings = {}  # คีย์ผสม -> callback ตอนปล่อยปุ่ม (ใช้กับโหมดกดค้างเพื่อเล่น)
+        self.fired = {}  # vk -> คีย์ผสมที่ยิงไปตอนกด (ปล่อยปุ่มทีหลังจะรู้ว่าเป็นของปุ่มลัดไหน)
         self.mods = set()
         self.down = set()
         self.enabled = True
@@ -84,6 +86,7 @@ class HotkeyManager:
             return
         cb = self.bindings.get((mods, vk))
         if cb:
+            self.fired[vk] = (mods, vk)
             cb()
 
     def _release(self, key):
@@ -93,6 +96,11 @@ class HotkeyManager:
         if vk in MOD_VKS:
             self.mods.discard(MOD_VKS[vk])
         self.down.discard(vk)
+        combo = self.fired.pop(vk, None)  # ปล่อยปุ่มหลัก (ปล่อย Ctrl/Alt ก่อนก็ยังนับ)
+        if combo:
+            cb = self.release_bindings.get(combo)
+            if cb:
+                cb()
 
     def stop(self):
         self.listener.stop()

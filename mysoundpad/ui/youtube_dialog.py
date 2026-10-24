@@ -262,7 +262,7 @@ class YouTubeDialog(tk.Toplevel):
     ผลลัพธ์: self.result = (url, name, start, end, mode) โดย start/end = None คือไม่ตัดฝั่งนั้น
     """
 
-    def __init__(self, parent, on_update, preview_device):
+    def __init__(self, parent, on_update, preview_device, url=None):
         super().__init__(parent)
         style_window(self)
         self.title("ดึงเสียงจาก YouTube")
@@ -361,6 +361,8 @@ class YouTubeDialog(tk.Toplevel):
                 self.v_url.set(clip)
         except tk.TclError:
             pass
+        if url:  # ลากลิงก์มาวางบนหน้าต่างหลัก
+            self.v_url.set(url)
         self.url_entry.focus_set()
         self.url_entry.select_range(0, "end")
         self.bind("<Return>", lambda e: self._ok())

@@ -9,7 +9,7 @@ import sys
 APP_NAME = "MySoundpad"
 
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 
 
 FROZEN = getattr(sys, "frozen", False)  # True เมื่อรันจาก .exe (PyInstaller)

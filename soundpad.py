@@ -32,7 +32,11 @@ def main():
         pass
     os.makedirs(DATA_DIR, exist_ok=True)
     from mysoundpad.ui.app import SoundpadApp
-    root = tk.Tk()
+    try:  # หน้าต่างที่รับการลากไฟล์มาวางได้ (ถ้าไม่มี tkinterdnd2 ก็ใช้หน้าต่างปกติ)
+        from tkinterdnd2 import TkinterDnD
+        root = TkinterDnD.Tk()
+    except Exception:
+        root = tk.Tk()
     SoundpadApp(root)
     root.mainloop()
 

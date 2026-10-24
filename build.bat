@@ -1,6 +1,6 @@
 @echo off
 rem Builds MySoundpad.exe and the installer -> build\installer\MySoundpad-Setup-<version>.exe
-rem Needs: pip install pyinstaller pillow sounddevice soundfile numpy pynput yt-dlp imageio-ffmpeg
+rem Needs: pip install pyinstaller pillow sounddevice soundfile numpy pynput yt-dlp imageio-ffmpeg tkinterdnd2
 rem        and Inno Setup 6 (winget install JRSoftware.InnoSetup)
 setlocal
 cd /d "%~dp0"
@@ -14,7 +14,7 @@ echo === [1/2] PyInstaller ===
 python -m PyInstaller --noconfirm --clean --windowed --name MySoundpad ^
   --icon "%ASSETS%\icon.ico" --add-data "%ASSETS%\icon.ico;." --add-data "%ASSETS%\icon.png;." ^
   --version-file "%ASSETS%\version_info.txt" ^
-  --collect-data imageio_ffmpeg --collect-submodules yt_dlp ^
+  --collect-data imageio_ffmpeg --collect-submodules yt_dlp --collect-all tkinterdnd2 ^
   --hidden-import pynput.keyboard._win32 --hidden-import pynput.mouse._win32 ^
   --distpath build\dist --workpath build\work --specpath build ^
   soundpad.py || goto :fail

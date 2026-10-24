@@ -71,7 +71,7 @@ def status_kind(text):
     """แยกชนิดสถานะจากข้อความ (ข้อความสถานะในแอปขึ้นต้นด้วยสัญลักษณ์บอกชนิดอยู่แล้ว)"""
     for prefixes, kind in ((("▶",), "playing"), (("⏸",), "paused"), (("⚠",), "error"),
                            (("✅", "เพิ่ม "), "success"), (("■", "ยกเลิก"), "stopped"),
-                           (("⏳", "🔎", "⬇", "⚙", "⬆"), "busy"), (("ยังไม่ได้เลือก",), "warn"),
+                           (("⏳", "🔎", "⬇", "⚙", "⬆"), "busy"), (("ยังไม่ได้เลือก", "ยังไม่ได้เปิด"), "warn"),
                            (("🆕",), "update")):
         if text.startswith(prefixes):
             return kind
@@ -136,6 +136,12 @@ def apply_theme(root):
         s.map(w, background=[("active", bg)], foreground=[("active", T["pink_hi"])],
               indicatorbackground=[("selected", pink), ("active", hv)])
 
+    # ปุ่มแบบชิป (แท็บหมวดหมู่ / ปุ่มเลือกเอฟเฟกต์เสียง): เลือกอยู่ = ชมพู
+    s.configure("Chip.Toolbutton", background=sf2, foreground=tx, bordercolor=bd, lightcolor=sf2, darkcolor=sf2,
+                padding=(12, 4), anchor="center")
+    s.map("Chip.Toolbutton", background=[("selected", pink), ("active", hv)],
+          foreground=[("selected", "#ffffff")], bordercolor=[("selected", pink), ("active", purple)],
+          lightcolor=[("selected", pink), ("active", hv)], darkcolor=[("selected", pink), ("active", hv)])
     s.configure("Horizontal.TProgressbar", background=pink, troughcolor=sf2, bordercolor=bd, lightcolor=pink,
                 darkcolor=pink)
     s.configure("Horizontal.TScale", background=pink, troughcolor=sf2, bordercolor=bd, lightcolor=pink,

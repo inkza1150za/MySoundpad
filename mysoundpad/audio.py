@@ -77,12 +77,15 @@ def soft_limit(x):
 
 
 class MicPassthrough:
-    """อ่านไมค์จริงเก็บลง buffer เพื่อผสมเข้ากับไมค์เสมือน"""
+    """อ่านไมค์จริงเก็บลง buffer เพื่อผสมเข้ากับไมค์เสมือน (ผ่าน voice changer ถ้าตั้งไว้)"""
 
     def __init__(self, device, sr, get_volume):
         self.sr = sr
         self.get_volume = get_volume
+        self.fx = None            # VoiceFX หรือ None (สลับได้ระหว่างทำงาน แค่แทน object)
+        self.monitor_on = False   # ส่งเสียงที่ผ่านเอฟเฟกต์ไปหูฟังด้วย (ไว้ลองเสียงตัวเอง)
         self.buf = np.zeros((0, 2), np.float32)
+        self.mbuf = np.zeros((0, 2), np.float32)
         self.lock = threading.Lock()
         ch = min(2, sd.query_devices(device)["max_input_channels"])
         self.stream = sd.InputStream(device=device, samplerate=sr, channels=ch,
@@ -90,25 +93,47 @@ class MicPassthrough:
         self.stream.start()
 
     def _cb(self, indata, frames, t, status):
-        mono = indata.mean(axis=1, keepdims=True)
-        stereo = np.repeat(mono, 2, axis=1)
+        mono = indata.mean(axis=1)
+        fx = self.fx
+        if fx is not None:
+            mono = fx.process(mono)
+        stereo = np.repeat(mono[:, None], 2, axis=1)
+        limit = int(self.sr * 0.15)  # กัน latency สะสม
         with self.lock:
-            self.buf = np.concatenate([self.buf, stereo])
-            limit = int(self.sr * 0.15)  # กัน latency สะสม
-            if len(self.buf) > limit:
-                self.buf = self.buf[-limit:]
+            self.buf = np.concatenate([self.buf, stereo])[-limit:]
+            if self.monitor_on:
+                self.mbuf = np.concatenate([self.mbuf, stereo])[-limit:]
+
+    @staticmethod
+    def _take(buf, frames):
+        chunk, rest = buf[:frames], buf[frames:]
+        if len(chunk) < frames:
+            chunk = np.concatenate([chunk, np.zeros((frames - len(chunk), 2), np.float32)])
+        return chunk, rest
 
     def read(self, frames):
         with self.lock:
-            chunk = self.buf[:frames]
-            self.buf = self.buf[frames:]
-        if len(chunk) < frames:
-            chunk = np.concatenate([chunk, np.zeros((frames - len(chunk), 2), np.float32)])
+            chunk, self.buf = self._take(self.buf, frames)
+        return chunk * self.get_volume()
+
+    def read_monitor(self, frames):
+        with self.lock:
+            chunk, self.mbuf = self._take(self.mbuf, frames)
         return chunk * self.get_volume()
 
     def close(self):
         self.stream.stop()
         self.stream.close()
+
+
+class MonitorTap:
+    """ให้ mixer ของหูฟังอ่านเสียงไมค์ที่ผ่านเอฟเฟกต์ (ปุ่ม "ฟังเสียงตัวเอง")"""
+
+    def __init__(self, mic):
+        self.mic = mic
+
+    def read(self, frames):
+        return self.mic.read_monitor(frames)
 
 
 class OutputMixer:
@@ -119,17 +144,30 @@ class OutputMixer:
         self.sr = int(info["default_samplerate"])
         self.channels = min(2, info["max_output_channels"])
         self.get_volume = get_volume
-        self.mic = mic
-        self.voices = []  # [data (ndarray int16/float32 หรือ StreamSource/FileSource), pos, sound_id]
+        self.mic = mic  # อะไรก็ได้ที่มี read(frames): เสียงไมค์จริง (CABLE) หรือเสียงตัวเองที่ผ่านเอฟเฟกต์ (หูฟัง)
+        # [data (ndarray int16/float32 หรือ StreamSource/FileSource), pos, sound_id, loop, fade_left]
+        self.voices = []
         self.paused = False  # พัก: เก็บตำแหน่งเสียงไว้ ไม่เดินหน้า (เสียงไมค์จริงยังผ่านตามปกติ)
+        self.fade_frames = int(self.sr * 0.03)  # หยุดเสียงเดี่ยวแบบค่อยๆ เบาลง 30 ms กันเสียงคลิก
         self.lock = threading.Lock()
         self.stream = sd.OutputStream(device=device, samplerate=self.sr, channels=self.channels,
                                       dtype="float32", blocksize=BLOCK, callback=self._cb)
         self.stream.start()
 
-    def play(self, data, sound_id):
+    def play(self, data, sound_id, loop=False):
+        """loop: เสียงใน RAM วนต่อกันไม่มีรอยต่อ (เพลงยาว/สตรีมวนที่ฝั่ง ffmpeg แทน)"""
         with self.lock:
-            self.voices.append([data, 0, sound_id])
+            self.voices.append([data, 0, sound_id, loop, None])
+
+    def stop_sound(self, sound_id):
+        """หยุดเฉพาะเสียงนี้ (ค่อยๆ เบาลง) เสียงอื่นเล่นต่อ"""
+        with self.lock:
+            if self.paused:  # พักอยู่ เวลาไม่เดิน ค่อยๆ เบาลงไม่ได้ -> เอาออกเลย
+                self.voices = [v for v in self.voices if v[2] != sound_id]
+                return
+            for v in self.voices:
+                if v[2] == sound_id and v[4] is None:
+                    v[4] = self.fade_frames
 
     def stop_all(self):
         with self.lock:
@@ -145,17 +183,30 @@ class OutputMixer:
             if not self.paused:  # พักอยู่ = ไม่แตะ voices เลย ตำแหน่งจึงค้างไว้ที่เดิม
                 alive = []
                 for v in self.voices:
-                    data, pos = v[0], v[1]
+                    data, pos, _, loop, fade = v
                     if not isinstance(data, np.ndarray):  # StreamSource / FileSource
                         chunk = data.read(pos, frames)  # ข้อมูลมาไม่ทัน = เงียบชั่วครู่ ไม่ข้ามเสียง
                         v[1] = pos + len(chunk)
                         finished = data.finished_at(v[1])
                     else:
                         chunk = data[pos:pos + frames]
+                        if loop and len(chunk) < frames and len(data):  # ต่อหัวเสียงทันทีที่ถึงท้าย
+                            parts, need = [chunk], frames - len(chunk)
+                            while need > 0:
+                                parts.append(data[:need])
+                                need -= len(parts[-1])
+                            chunk = np.concatenate(parts)
+                            v[1] = (pos + frames) % len(data)
+                        else:
+                            v[1] = pos + frames
                         if chunk.dtype == np.int16:
                             chunk = chunk.astype(np.float32) * (1 / 32768)
-                        v[1] = pos + frames
-                        finished = v[1] >= len(data)
+                        finished = not loop and v[1] >= len(data)
+                    if fade is not None:  # กำลังค่อยๆ เบาลงก่อนหยุด
+                        ramp = np.clip((fade - np.arange(len(chunk))) / self.fade_frames, 0, 1)
+                        chunk = chunk * ramp[:, None]
+                        v[4] = fade - len(chunk)
+                        finished = finished or v[4] <= 0
                     out[:len(chunk)] += chunk
                     if not finished:
                         alive.append(v)

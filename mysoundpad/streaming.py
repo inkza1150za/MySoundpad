@@ -18,7 +18,7 @@ class StreamSource:
     ถอดรหัสล่วงหน้าไม่เกิน STREAM_AHEAD วินาที และทิ้งส่วนที่เล่นผ่านไปแล้ว RAM จึงคงที่แม้คลิปยาวเป็นชั่วโมง
     """
 
-    def __init__(self, url, headers, sr, start=None, end=None, network=True):
+    def __init__(self, url, headers, sr, start=None, end=None, network=True, loop=False):
         import imageio_ffmpeg
         self.sr = sr
         self.data = np.zeros((sr * (STREAM_AHEAD + STREAM_KEEP * 2), 2), np.float32)
@@ -34,6 +34,8 @@ class StreamSource:
             cmd += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]
         if headers:
             cmd += ["-headers", "".join(f"{k}: {v}\r\n" for k, v in headers.items())]
+        if loop:  # วนไฟล์ไม่รู้จบ ffmpeg ถอดรหัสต่อเนื่องจากท้ายไปหัว จึงไม่มีช่วงเงียบตรงรอยต่อ
+            cmd += ["-stream_loop", "-1"]
         if start is not None:
             cmd += ["-ss", str(start)]
         if end is not None:
@@ -103,14 +105,14 @@ class FileSource:
     รอยต่อจึงตรงกันทุก sample
     """
 
-    def __init__(self, path, sr):
+    def __init__(self, path, sr, loop=False):
         self.key = (path, sr)
         self.sr = sr
         self.head = _head_cache.get(self.key)  # int16 หรือ None (ยังไม่เคยเล่น)
         if self.head is not None:
             _head_cache.move_to_end(self.key)
         self.head_frames = sr * HEAD_SECONDS
-        self.stream = StreamSource(path, None, sr, network=False)
+        self.stream = StreamSource(path, None, sr, network=False, loop=loop)
 
     @property
     def done(self):

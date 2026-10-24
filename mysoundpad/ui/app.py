@@ -12,8 +12,10 @@ import sounddevice as sd
 import soundfile as sf
 
 from .. import config
-from ..audio import LONG_SOUND_SECONDS, MicPassthrough, OutputMixer, list_devices, load_audio
-from ..config import APP_NAME, APP_VERSION, AUDIO_EXT, STREAM_PREBUFFER, STREAM_TIMEOUT, UPDATE_CHECK_HOURS, YT_MAX_MINUTES
+from ..audio import LONG_SOUND_SECONDS, MicPassthrough, MonitorTap, OutputMixer, list_devices, load_audio
+from ..config import (APP_NAME, APP_VERSION, AUDIO_EXT, STREAM_PREBUFFER, STREAM_TIMEOUT, UPDATE_CHECK_HOURS,
+                      YT_MAX_MINUTES, YT_URL_RE)
+from ..voicefx import EFFECTS, VoiceFX
 from ..hotkeys import HotkeyManager, hotkey_key, hotkey_text
 from ..streaming import FileSource, StreamSource
 from ..theme import FONT, STATUS_LABELS, T, apply_theme, find_resource, set_app_icon, status_kind, style_window, use_theme
@@ -21,6 +23,11 @@ from .dialogs import HotkeyDialog, UpdateDialog
 from .youtube_dialog import YouTubeDialog
 from ..updater import check_for_update, run_installer
 from ..youtube import _stream_url_cache, download_latest_ytdlp, friendly_yt_error, import_ytdlp, youtube_download, youtube_info, youtube_stream_url
+
+TAB_ALL, TAB_FAV = "__all__", "__fav__"  # แท็บพิเศษ (หมวดที่ผู้ใช้สร้างใช้ชื่อหมวดเป็นค่าแท็บ)
+MODE_ICONS = {"normal": "", "loop": "🔁", "hold": "✋"}
+MODE_LABELS = {"normal": "ปกติ — เล่นจนจบ", "loop": "🔁 เล่นวน — กดปุ่มลัดซ้ำเพื่อหยุด",
+               "hold": "✋ กดค้าง — เล่นตอนกดปุ่มลัดค้าง ปล่อยแล้วหยุด"}
 
 
 class SoundpadApp:
@@ -30,8 +37,19 @@ class SoundpadApp:
         set_app_icon(root)
         root.geometry("980x720")  # ปรับอีกครั้งหลังสร้างหน้าจอ ให้พอดีกับเนื้อหาจริง
 
-        self.sounds = []  # {"id","path","name","hotkey"}
+        self.sounds = []  # {"id","path","name","hotkey","category","fav","mode"} เรียงตามลำดับที่แสดง
         self.next_id = 1
+        self.categories = []  # ชื่อหมวดที่ผู้ใช้สร้าง เรียงตามแท็บ
+        self.v_tab = tk.StringVar(value=TAB_ALL)
+        self.looping = set()  # id เสียงโหมดวนที่กำลังเล่น (กดปุ่มลัดซ้ำ = หยุด)
+        self._stream_pending = set()  # id เสียงสตรีมที่กำลังเชื่อมต่อ (ไม่ต้องเริ่มวนซ้ำระหว่างนี้)
+        self._drag = None  # สถานะการลากเรียงลำดับในรายการ
+        self.v_fx = tk.StringVar(value="off")
+        self.v_fx_strength = tk.DoubleVar(value=60)
+        self.v_fx_monitor = tk.BooleanVar(value=False)
+        self.fx_hotkey = None
+        self.last_fx = "pitch_up"  # ปุ่มลัดสลับเสียงจะเปิดเอฟเฟกต์ล่าสุดที่ใช้
+        self._fx_after = None
         self.monitor = None
         self.cable = None
         self.mic = None
@@ -115,6 +133,11 @@ class SoundpadApp:
         self.btn_pause.pack(side="left")
         ttk.Button(top, text="■ หยุด", style="Big.TButton", command=self.stop_all).pack(side="left", padx=(4, 0))
 
+        # ---- แท็บหมวดหมู่: ทั้งหมด / ⭐ โปรด / หมวดที่สร้างเอง / ＋
+        self.tabbar = ttk.Frame(self.root, padding=(12, 4, 12, 0))
+        self.tabbar.pack(fill="x")
+        self._rebuild_tabs()
+
         # ---- ค้นหา: แถวของตัวเอง กว้างเต็มหน้าต่าง
         bar = ttk.Frame(self.root, padding=(12, 4, 12, 8))
         bar.pack(fill="x")
@@ -133,14 +156,19 @@ class SoundpadApp:
 
         mid = ttk.Frame(self.root, padding=(12, 0))
         mid.pack(fill="both", expand=True)
-        cols = ("no", "name", "hotkey", "length")
-        self.tree = ttk.Treeview(mid, columns=cols, show="headings", selectmode="extended")
-        for c, text, w, anchor in [("no", "#", 40, "center"), ("name", "ชื่อเสียง", 420, "w"),
-                                   ("hotkey", "ปุ่มลัด", 150, "center"), ("length", "ความยาว", 80, "center")]:
+        # กรอบรอบรายการ: เปลี่ยนเป็นสีชมพูตอนลากไฟล์มาวาง
+        self.drop_frame = tk.Frame(mid, highlightthickness=2, bd=0)
+        self.drop_frame.pack(fill="both", expand=True)
+        self._drop_highlight(False)
+        cols = ("fav", "no", "name", "mode", "hotkey", "length")
+        self.tree = ttk.Treeview(self.drop_frame, columns=cols, show="headings", selectmode="extended")
+        for c, text, w, anchor in [("fav", "⭐", 36, "center"), ("no", "#", 40, "center"),
+                                   ("name", "ชื่อเสียง", 400, "w"), ("mode", "โหมด", 54, "center"),
+                                   ("hotkey", "ปุ่มลัด", 140, "center"), ("length", "ความยาว", 80, "center")]:
             self.tree.heading(c, text=text)
             self.tree.column(c, width=w, anchor=anchor, stretch=(c == "name"))
         self._style_tree_tags()
-        sb = ttk.Scrollbar(mid, orient="vertical", command=self.tree.yview)
+        sb = ttk.Scrollbar(self.drop_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
@@ -148,6 +176,30 @@ class SoundpadApp:
         self.tree.bind("<Return>", lambda e: self.play_selected())
         self.tree.bind("<Delete>", lambda e: self.remove())
         self.tree.bind("<space>", lambda e: (self.toggle_pause(), "break")[1])
+        self.tree.bind("<Button-1>", self._on_tree_press)
+        self.tree.bind("<B1-Motion>", self._on_tree_motion)
+        self.tree.bind("<ButtonRelease-1>", self._on_tree_release)
+        self.tree.bind("<Button-3>", self._on_tree_menu)
+        self._setup_dnd()
+
+        # ---- เปลี่ยนเสียงพูด (voice changer) สำหรับเสียงไมค์จริงที่ส่งให้เพื่อน
+        fxbar = ttk.Frame(self.root, padding=(12, 8, 12, 0))
+        fxbar.pack(fill="x")
+        ttk.Label(fxbar, text="🤖 เปลี่ยนเสียง").pack(side="left", padx=(0, 8))
+        for key, label in EFFECTS.items():
+            ttk.Radiobutton(fxbar, text=label, value=key, variable=self.v_fx, style="Chip.Toolbutton",
+                            command=self._apply_fx).pack(side="left", padx=(0, 4))
+        self.btn_fx_hk = ttk.Button(fxbar, command=self.set_fx_hotkey)
+        self.btn_fx_hk.pack(side="right")
+        ttk.Checkbutton(fxbar, text="ฟังเสียงตัวเอง", variable=self.v_fx_monitor,
+                        command=self._apply_fx).pack(side="right", padx=(8, 8))
+        self.v_fx_pct = tk.StringVar()
+        ttk.Label(fxbar, textvariable=self.v_fx_pct, width=5).pack(side="right")
+        ttk.Scale(fxbar, from_=0, to=100, variable=self.v_fx_strength, length=110).pack(side="right", padx=(4, 2))
+        ttk.Label(fxbar, text="ความแรง").pack(side="right", padx=(12, 0))
+        self.v_fx_strength.trace_add("write", lambda *_: self._fx_strength_changed())
+        self.v_fx_pct.set(f"{round(self.v_fx_strength.get())}%")
+        self._update_fx_hotkey_btn()
 
         # ---- settings
         bottom = ttk.Frame(self.root, padding=(12, 10, 12, 10))
@@ -281,6 +333,7 @@ class SoundpadApp:
             except Exception as e:
                 errors.append(f"ไมค์เสมือน: {e}")
         self._set_paused(False, quiet=True)  # mixer ใหม่ยังไม่มีเสียงค้าง
+        self._apply_fx(quiet=True)  # ไมค์ตัวใหม่ต้องได้เอฟเฟกต์เดิม
 
         if errors:
             self.v_status.set("⚠ " + " | ".join(errors))
@@ -291,21 +344,32 @@ class SoundpadApp:
         self._save()
 
     # ---------- actions
+    def _new_sound(self, **fields):
+        """เสียงใหม่เข้าแท็บที่เปิดอยู่ (หมวดนั้น / ถ้าอยู่แท็บ ⭐ ก็ติดดาวให้ จะได้ไม่หายจากหน้าจอ)"""
+        tab = self.v_tab.get()
+        s = {"id": self.next_id, "hotkey": None, "category": tab if tab in self.categories else None,
+             "fav": tab == TAB_FAV, "mode": "normal"}
+        s.update(fields)
+        self.next_id += 1
+        self.sounds.append(s)
+        return s
+
     def _add_paths(self, paths):
         known = {s["path"] for s in self.sounds}
-        added = 0
+        added = skipped = 0
         for p in paths:
             p = os.path.abspath(p)
-            if p in known or not p.lower().endswith(AUDIO_EXT):
+            if p in known:
                 continue
-            self.sounds.append({"id": self.next_id, "path": p,
-                                "name": os.path.splitext(os.path.basename(p))[0], "hotkey": None})
-            self.next_id += 1
+            if not p.lower().endswith(AUDIO_EXT):
+                skipped += 1
+                continue
+            self._new_sound(path=p, name=os.path.splitext(os.path.basename(p))[0])
             known.add(p)
             added += 1
         self._refresh_list()
         self._save()
-        self.v_status.set(f"เพิ่ม {added} เสียง")
+        self.v_status.set(f"เพิ่ม {added} เสียง" + (f" (ข้าม {skipped} ไฟล์ที่ไม่ใช่ไฟล์เสียง)" if skipped else ""))
 
     def add_files(self):
         paths = filedialog.askopenfilenames(title="เลือกไฟล์เสียง", filetypes=[
@@ -313,7 +377,7 @@ class SoundpadApp:
         if paths:
             self._add_paths(paths)
 
-    def add_youtube(self):
+    def add_youtube(self, url=None):
         try:
             import_ytdlp()
             import imageio_ffmpeg  # noqa: F401
@@ -325,7 +389,7 @@ class SoundpadApp:
         preview_dev = self._dev_index(self.cb_monitor, self.out_devs)
         if preview_dev is None:
             preview_dev = sd.default.device[1]
-        dlg = YouTubeDialog(self.root, self.update_ytdlp, preview_dev)
+        dlg = YouTubeDialog(self.root, self.update_ytdlp, preview_dev, url=url)
         self.root.wait_window(dlg)
         if not dlg.result:
             return
@@ -370,10 +434,7 @@ class SoundpadApp:
 
     def _add_stream(self, url, name, start, end, length):
         self.btn_yt.config(state="normal")
-        s = {"id": self.next_id, "path": None, "url": url, "start": start, "end": end,
-             "name": name, "hotkey": None, "length": length}
-        self.next_id += 1
-        self.sounds.append(s)
+        s = self._new_sound(path=None, url=url, start=start, end=end, name=name, length=length)
         self._refresh_list()
         self._save()
         self.tree.selection_set(str(s["id"]))
@@ -434,16 +495,14 @@ class SoundpadApp:
         self._rebind_hotkeys()
         self._save()
 
-    def rename(self):
-        sel = self._selected()
-        if len(sel) != 1:
-            return
-        s = sel[0]
+    def _ask_text(self, title, initial=""):
+        """หน้าต่างพิมพ์ข้อความ 1 บรรทัด คืนข้อความ (ตัดช่องว่างแล้ว) หรือ None ถ้ายกเลิก/ว่าง"""
         win = tk.Toplevel(self.root)
         style_window(win)
-        win.title("เปลี่ยนชื่อ")
+        win.title(title)
         win.transient(self.root)
-        var = tk.StringVar(value=s["name"])
+        win.resizable(False, False)
+        var, result = tk.StringVar(value=initial), []
         ent = ttk.Entry(win, textvariable=var, width=40)
         ent.pack(padx=12, pady=12)
         ent.select_range(0, "end")
@@ -451,13 +510,24 @@ class SoundpadApp:
 
         def ok(_=None):
             if var.get().strip():
-                s["name"] = var.get().strip()
-                self._refresh_list()
-                self._save()
+                result.append(var.get().strip())
             win.destroy()
         ent.bind("<Return>", ok)
         ent.bind("<Escape>", lambda e: win.destroy())
         ttk.Button(win, text="ตกลง", command=ok).pack(pady=(0, 12))
+        win.grab_set()
+        self.root.wait_window(win)
+        return result[0] if result else None
+
+    def rename(self):
+        sel = self._selected()
+        if len(sel) != 1:
+            return
+        name = self._ask_text("เปลี่ยนชื่อ", sel[0]["name"])
+        if name:
+            sel[0]["name"] = name
+            self._refresh_list()
+            self._save()
 
     def _ask_hotkey(self, title):
         self.hotkeys.enabled = False
@@ -497,14 +567,19 @@ class SoundpadApp:
         self.btn_stop_hk.config(text=f"หยุด: {hotkey_text(self.stop_hotkey) or '-'}")
 
     def _rebind_hotkeys(self):
-        b = {}
+        b, rb = {}, {}
         for s in self.sounds:
             if s["hotkey"]:
-                sid = s["id"]
-                b[hotkey_key(s["hotkey"])] = lambda sid=sid: self.root.after(0, self.play_id, sid)
+                sid, key = s["id"], hotkey_key(s["hotkey"])
+                b[key] = lambda sid=sid: self.root.after(0, self.play_id, sid)
+                if s.get("mode") == "hold":  # ปล่อยปุ่ม = หยุดเสียงนี้
+                    rb[key] = lambda sid=sid: self.root.after(0, self.stop_sound, sid)
         if self.stop_hotkey:
             b[hotkey_key(self.stop_hotkey)] = lambda: self.root.after(0, self.stop_all)
+        if self.fx_hotkey:
+            b[hotkey_key(self.fx_hotkey)] = lambda: self.root.after(0, self.toggle_fx)
         self.hotkeys.bindings = b
+        self.hotkeys.release_bindings = rb
 
     def play_selected(self):
         for s in self._selected()[:1]:
@@ -522,6 +597,11 @@ class SoundpadApp:
         s = next((x for x in self.sounds if x["id"] == sid), None)
         if not s:
             return
+        loop = s.get("mode") == "loop"
+        if loop and sid in self.looping:  # เสียงวนที่เล่นอยู่: กดซ้ำ = หยุด
+            self.stop_sound(sid)
+            self.v_status.set(f"■ หยุดเล่นวน: {s['name']}")
+            return
         if s.get("url"):
             self._play_stream(s)
             return
@@ -537,26 +617,45 @@ class SoundpadApp:
                 sources = {}
                 for m in self._targets():
                     if m.sr not in sources:
-                        sources[m.sr] = FileSource(s["path"], m.sr)
+                        sources[m.sr] = FileSource(s["path"], m.sr, loop=loop)
+                        sources[m.sr].sid = sid
                     m.play(sources[m.sr], sid)
                 with self.stream_lock:
                     self.streams.extend(sources.values())
             else:
                 for m in self._targets():
-                    m.play(load_audio(s["path"], m.sr), sid)
+                    m.play(load_audio(s["path"], m.sr), sid, loop=loop)
         except Exception as e:
             self.v_status.set(f"⚠ เปิดไฟล์ไม่ได้: {e}")
             return
-        self.v_status.set(f"▶ กำลังเล่น: {s['name']}")
+        if loop:
+            self.looping.add(sid)
+        self.v_status.set(f"▶ กำลังเล่น{'วน' if loop else ''}: {s['name']}")
 
-    def _play_stream(self, s):
-        if self.v_stop_prev.get():
+    def _play_stream(self, s, restart=False):
+        """restart = เริ่มรอบใหม่ของสตรีมโหมดวน (ไม่หยุดเสียงอื่น ไม่เปลี่ยนข้อความสถานะ)"""
+        if self.v_stop_prev.get() and not restart:
             self.stop_all()
         targets = self._targets()
         if not targets:
             return
-        self.v_status.set(f"⏳ กำลังเชื่อมต่อ: {s['name']}")
+        if s.get("mode") == "loop":
+            self.looping.add(s["id"])
+        self._stream_pending.add(s["id"])
+        if not restart:
+            self.v_status.set(f"⏳ กำลังเชื่อมต่อ: {s['name']}")
         threading.Thread(target=self._stream_worker, args=(s, targets, self.stream_gen), daemon=True).start()
+
+    def stop_sound(self, sid):
+        """หยุดเฉพาะเสียงนี้ (ค่อยๆ เบาลง 30 ms) ใช้กับโหมดกดค้างและการกดเสียงวนซ้ำ"""
+        self.looping.discard(sid)
+        for m in (self.monitor, self.cable):
+            if m:
+                m.stop_sound(sid)
+        with self.stream_lock:
+            for src in self.streams:
+                if getattr(src, "sid", None) == sid:
+                    src.stop()
 
     def _stream_worker(self, s, targets, gen):
         """หา URL -> เปิด ffmpeg ต่อ sample rate -> รอ buffer ขั้นต่ำ แล้วส่งให้ main thread เริ่มเล่น"""
@@ -566,6 +665,7 @@ class SoundpadApp:
             for m in targets:
                 if m.sr not in sources:
                     sources[m.sr] = StreamSource(url, headers, m.sr, s.get("start"), s.get("end"))
+                    sources[m.sr].sid = s["id"]
             with self.stream_lock:
                 self.streams.extend(sources.values())
             deadline = time.time() + STREAM_TIMEOUT
@@ -582,20 +682,27 @@ class SoundpadApp:
             for src in sources.values():
                 src.stop()
             _stream_url_cache.pop(s["url"], None)  # URL อาจเสีย ครั้งหน้าให้หาใหม่
+            self.root.after(0, self._stream_failed, s["id"])  # ไม่วนซ้ำสตรีมที่เชื่อมต่อไม่ได้
             if gen == self.stream_gen:
                 self._yt_status("⚠ สตรีมไม่ได้: " + friendly_yt_error(e))
             return
         self.root.after(0, self._stream_ready, s, targets, sources, gen)
 
+    def _stream_failed(self, sid):
+        self._stream_pending.discard(sid)
+        self.looping.discard(sid)
+
     def _stream_ready(self, s, targets, sources, gen):
-        if gen != self.stream_gen:  # กดหยุดระหว่างรอเชื่อมต่อ
-            for src in sources.values():
+        self._stream_pending.discard(s["id"])
+        if gen != self.stream_gen or (s.get("mode") == "loop" and s["id"] not in self.looping):
+            for src in sources.values():  # กดหยุดระหว่างรอเชื่อมต่อ
                 src.stop()
             return
         self._set_paused(False, quiet=True)
         for m in targets:
             m.play(sources[m.sr], s["id"])
-        self.v_status.set(f"▶ กำลังเล่น: {s['name']}")
+        if not self.v_status.get().startswith("▶"):
+            self.v_status.set(f"▶ กำลังเล่น{'วน' if s.get('mode') == 'loop' else ''}: {s['name']}")
 
     def toggle_pause(self):
         playing = any(m.playing_ids() for m in (self.monitor, self.cable) if m)
@@ -613,6 +720,8 @@ class SoundpadApp:
 
     def stop_all(self):
         self.stream_gen += 1  # ยกเลิกสตรีมที่กำลังเชื่อมต่อ
+        self.looping.clear()
+        self._stream_pending.clear()
         with self.stream_lock:
             for src in self.streams:
                 src.stop()
@@ -627,12 +736,14 @@ class SoundpadApp:
     # ---------- list
     def _refresh_list(self):
         q = self.v_search.get().lower().strip()
+        tab = self.v_tab.get()
         sel = self.tree.selection()
         self._row_state = None  # แถวถูกสร้างใหม่ ให้ _tick ระบายสีอีกรอบ
         self.tree.delete(*self.tree.get_children())
-        for i, s in enumerate(self.sounds, 1):
-            if q and q not in s["name"].lower():
-                continue
+        rows = [s for s in self.sounds
+                if (tab == TAB_ALL or (tab == TAB_FAV and s.get("fav")) or s.get("category") == tab)
+                and (not q or q in s["name"].lower())]
+        for i, s in enumerate(rows, 1):
             if "length" not in s:
                 try:
                     s["length"] = sf.info(s["path"]).duration
@@ -642,12 +753,279 @@ class SoundpadApp:
             length = f"{int(ln // 60)}:{int(ln % 60):02d}" if ln is not None else "?"
             name = ("🌐 " if s.get("url") else "") + s["name"]
             self.tree.insert("", "end", iid=str(s["id"]),
-                             values=(i, name, hotkey_text(s["hotkey"]), length))
+                             values=("★" if s.get("fav") else "☆", i, name, MODE_ICONS[s.get("mode", "normal")],
+                                     hotkey_text(s["hotkey"]), length))
         keep = [i for i in sel if self.tree.exists(i)]
         if keep:
             self.tree.selection_set(keep)
-        shown, total = len(self.tree.get_children()), len(self.sounds)
-        self.v_count.set(f"{shown}/{total} เสียง" if q else f"{total} เสียง")
+        total = len(self.sounds)
+        self.v_count.set(f"{len(rows)}/{total} เสียง" if q or tab != TAB_ALL else f"{total} เสียง")
+
+    # ---------- หมวดหมู่ / โปรด
+    def _rebuild_tabs(self):
+        for w in self.tabbar.winfo_children():
+            w.destroy()
+        if self.v_tab.get() not in (TAB_ALL, TAB_FAV, *self.categories):
+            self.v_tab.set(TAB_ALL)  # หมวดที่บันทึกไว้ถูกลบไปแล้ว
+        for value, text in [(TAB_ALL, "ทั้งหมด"), (TAB_FAV, "⭐ โปรด")] + [(c, c) for c in self.categories]:
+            rb = ttk.Radiobutton(self.tabbar, text=text, value=value, variable=self.v_tab, style="Chip.Toolbutton",
+                                 command=self._tab_changed)
+            rb.pack(side="left", padx=(0, 4))
+            if value in self.categories:
+                rb.bind("<Button-3>", lambda e, c=value: self._tab_menu(e, c))
+        ttk.Button(self.tabbar, text="＋ หมวดใหม่", command=self.add_category).pack(side="left", padx=(4, 0))
+        ttk.Label(self.tabbar, text="คลิกขวาที่แท็บ = เปลี่ยนชื่อ/ลบ • คลิกขวาที่เสียง = ย้ายหมวด/โหมดเล่น",
+                  style="Muted.TLabel").pack(side="right")
+
+    def _tab_changed(self):
+        self._refresh_list()
+        self._save()
+
+    def _tab_menu(self, event, cat):
+        m = self._menu()
+        m.add_command(label="✏ เปลี่ยนชื่อหมวด", command=lambda: self.rename_category(cat))
+        m.add_command(label="🗑 ลบหมวด (เสียงยังอยู่ใน 'ทั้งหมด')", command=lambda: self.delete_category(cat))
+        m.tk_popup(event.x_root, event.y_root)
+
+    def _ask_category_name(self, title, initial=""):
+        name = self._ask_text(title, initial)
+        if not name or name in (TAB_ALL, TAB_FAV):
+            return None
+        if name in self.categories and name != initial:
+            messagebox.showinfo("หมวดซ้ำ", f"มีหมวด '{name}' อยู่แล้ว")
+            return None
+        return name
+
+    def add_category(self):
+        name = self._ask_category_name("หมวดใหม่")
+        if not name:
+            return None
+        self.categories.append(name)
+        self.v_tab.set(name)
+        self._rebuild_tabs()
+        self._refresh_list()
+        self._save()
+        return name
+
+    def rename_category(self, old):
+        new = self._ask_category_name("เปลี่ยนชื่อหมวด", old)
+        if not new or new == old:
+            return
+        self.categories[self.categories.index(old)] = new
+        for s in self.sounds:
+            if s.get("category") == old:
+                s["category"] = new
+        if self.v_tab.get() == old:
+            self.v_tab.set(new)
+        self._rebuild_tabs()
+        self._refresh_list()
+        self._save()
+
+    def delete_category(self, cat):
+        n = sum(1 for s in self.sounds if s.get("category") == cat)
+        if not messagebox.askyesno("ลบหมวด", f"ลบหมวด '{cat}'?\nเสียง {n} รายการในหมวดนี้จะยังอยู่ในแท็บ 'ทั้งหมด'"):
+            return
+        self.categories.remove(cat)
+        for s in self.sounds:
+            if s.get("category") == cat:
+                s["category"] = None
+        self._rebuild_tabs()
+        self._refresh_list()
+        self._save()
+
+    def _set_fav(self, sounds, fav):
+        for s in sounds:
+            s["fav"] = fav
+        self._refresh_list()
+        self._save()
+
+    def _move_to(self, sounds, cat):
+        for s in sounds:
+            s["category"] = cat
+        self._refresh_list()
+        self._save()
+        self.v_status.set(f"ย้าย {len(sounds)} เสียงไป{'หมวด ' + cat if cat else 'ไม่มีหมวด'}")
+
+    def _move_to_new(self, sounds):
+        tab = self.v_tab.get()
+        name = self.add_category()  # สลับไปแท็บหมวดใหม่ให้เห็นเสียงที่ย้ายมา
+        if name:
+            self._move_to(sounds, name)
+        else:
+            self.v_tab.set(tab)
+
+    def _set_mode(self, sounds, mode):
+        for s in sounds:
+            s["mode"] = mode
+            if mode != "loop":
+                self.looping.discard(s["id"])
+        self._refresh_list()
+        self._rebind_hotkeys()
+        self._save()
+
+    def _menu(self, parent=None):
+        return tk.Menu(parent or self.root, tearoff=0, bg=T["surface"], fg=T["text"], activebackground=T["sel"],
+                       activeforeground="#ffffff", selectcolor=T["pink"], bd=0)
+
+    def _on_tree_menu(self, event):
+        row = self.tree.identify_row(event.y)
+        if not row:
+            return
+        if row not in self.tree.selection():
+            self.tree.selection_set(row)
+        sel = self._selected()
+        m = self._menu()
+        m.add_command(label="▶ เล่น", command=self.play_selected)
+        all_fav = all(s.get("fav") for s in sel)
+        m.add_command(label="☆ เอาออกจากโปรด" if all_fav else "⭐ เพิ่มในโปรด",
+                      command=lambda: self._set_fav(sel, not all_fav))
+        cat = self._menu(m)
+        cat.add_command(label="(ไม่มีหมวด)", command=lambda: self._move_to(sel, None))
+        for c in self.categories:
+            cat.add_command(label=c, command=lambda c=c: self._move_to(sel, c))
+        cat.add_separator()
+        cat.add_command(label="＋ หมวดใหม่...", command=lambda: self._move_to_new(sel))
+        m.add_cascade(label="📂 ย้ายไปหมวด", menu=cat)
+        mode = self._menu(m)
+        self._menu_mode = tk.StringVar(value=sel[0].get("mode", "normal"))  # เก็บ ref ไว้ ไม่งั้นโดนเก็บขยะ
+        for key, label in MODE_LABELS.items():
+            mode.add_radiobutton(label=label, value=key, variable=self._menu_mode,
+                                 command=lambda k=key: self._set_mode(sel, k))
+        m.add_cascade(label="🔁 โหมดเล่น", menu=mode)
+        m.add_separator()
+        m.add_command(label="⌨ ตั้งปุ่มลัด", command=self.set_hotkey)
+        m.add_command(label="✏ เปลี่ยนชื่อ", command=self.rename)
+        m.add_command(label="🗑 ลบออกจากรายการ", command=self.remove)
+        m.tk_popup(event.x_root, event.y_root)
+
+    # ---------- คลิกดาว / ลากเรียงลำดับ
+    def _on_tree_press(self, event):
+        row = self.tree.identify_row(event.y)
+        if row and self.tree.identify_column(event.x) == "#1":  # คอลัมน์ดาว
+            s = next(x for x in self.sounds if x["id"] == int(row))
+            self._set_fav([s], not s.get("fav"))
+            return "break"
+        self._drag = {"row": row, "y": event.y, "moving": False, "target": None} if row else None
+
+    def _on_tree_motion(self, event):
+        d = self._drag
+        if not d:
+            return
+        if not d["moving"]:
+            if abs(event.y - d["y"]) < 6:
+                return
+            d["moving"] = True
+            self.tree.config(cursor="fleur")
+        target = self.tree.identify_row(event.y)
+        if target != d["target"]:
+            if d["target"] and self.tree.exists(d["target"]):
+                self.tree.item(d["target"], tags=())
+            if target and target not in self.tree.selection():
+                self.tree.item(target, tags=("droptarget",))
+            d["target"] = target
+            self._row_state = None  # ให้ _tick ระบายสีแถวเล่นอยู่กลับมาหลังลากเสร็จ
+
+    def _on_tree_release(self, event):
+        d, self._drag = self._drag, None
+        if not d or not d["moving"]:
+            return
+        self.tree.config(cursor="")
+        target = self.tree.identify_row(event.y)
+        ids = {int(i) for i in self.tree.selection()} | {int(d["row"])}
+        if not target or int(target) in ids:
+            self._refresh_list()
+            return
+        order = [s["id"] for s in self.sounds]
+        moving = [s for s in self.sounds if s["id"] in ids]
+        rest = [s for s in self.sounds if s["id"] not in ids]
+        tgt = int(target)
+        at = next(i for i, s in enumerate(rest) if s["id"] == tgt)
+        if order.index(tgt) > order.index(moving[0]["id"]):
+            at += 1  # ลากลง = วางใต้แถวเป้าหมาย / ลากขึ้น = วางเหนือ
+        self.sounds = rest[:at] + moving + rest[at:]
+        self._refresh_list()
+        self.tree.selection_set([str(s["id"]) for s in moving])
+        self._save()
+
+    # ---------- ลากไฟล์ / ลิงก์ YouTube มาวาง
+    def _setup_dnd(self):
+        try:
+            from tkinterdnd2 import DND_FILES, DND_TEXT
+            for w in (self.tree, self.drop_frame):
+                w.drop_target_register(DND_FILES, DND_TEXT)
+                w.dnd_bind("<<DropEnter>>", lambda e: (self._drop_highlight(True), e.action)[1])
+                w.dnd_bind("<<DropLeave>>", lambda e: (self._drop_highlight(False), e.action)[1])
+                w.dnd_bind("<<Drop>>", self._on_drop)
+        except Exception:
+            pass  # ไม่มี tkinterdnd2 หรือหน้าต่างไม่ได้สร้างด้วย TkinterDnD: ใช้ปุ่มเพิ่มไฟล์แทน
+
+    def _drop_highlight(self, on):
+        color = T["pink"] if on else T["bg"]
+        self.drop_frame.config(bg=T["bg"], highlightbackground=color, highlightcolor=color)
+
+    def _on_drop(self, event):
+        self._drop_highlight(False)
+        raw = event.data or ""
+        # ปกติได้เป็นข้อความแบบ Tcl list (path ที่มีช่องว่างอยู่ใน {}) บางเวอร์ชันส่งมาเป็น tuple
+        items = list(raw) if isinstance(raw, (tuple, list)) else list(self.root.tk.splitlist(raw))
+        data = raw.strip() if isinstance(raw, str) else ""
+        if YT_URL_RE.match(data):  # ลากลิงก์จากเบราว์เซอร์
+            self.root.after(10, lambda: self.add_youtube(url=data))
+            return event.action
+        paths = []
+        for p in items:
+            if os.path.isdir(p):
+                for dirpath, _, files in os.walk(p):
+                    paths += [os.path.join(dirpath, f) for f in sorted(files)]
+            elif os.path.isfile(p):
+                paths.append(p)
+        if paths:
+            self._add_paths(paths)
+        else:
+            self.v_status.set("⚠ ลากมาวางได้เฉพาะไฟล์เสียง โฟลเดอร์ หรือลิงก์ YouTube")
+        return event.action
+
+    # ---------- เปลี่ยนเสียงพูด
+    def _apply_fx(self, quiet=False):
+        name = self.v_fx.get()
+        if name != "off":
+            self.last_fx = name
+        mic = self.mic
+        if mic:
+            mic.fx = VoiceFX(mic.sr, name, self.v_fx_strength.get() / 100) if name != "off" else None
+            mic.monitor_on = self.v_fx_monitor.get()
+        if self.monitor:
+            listen = mic and self.v_fx_monitor.get() and self.monitor.sr == mic.sr
+            self.monitor.mic = MonitorTap(mic) if listen else None
+        if not quiet:
+            if name != "off" and not mic:
+                self.v_status.set("ยังไม่ได้เปิด 'ส่งเสียงไมค์จริงผ่านด้วย' — เปลี่ยนเสียงต้องใช้เสียงไมค์จริง")
+            else:
+                self.v_status.set(f"🤖 เปลี่ยนเสียง: {EFFECTS[name]}" if name != "off" else "พร้อม")
+            self._save()
+
+    def _fx_strength_changed(self):
+        self.v_fx_pct.set(f"{round(self.v_fx_strength.get())}%")
+        if self._fx_after:  # ลากแถบอยู่: รอหยุดลากก่อนค่อยสร้างเอฟเฟกต์ใหม่
+            self.root.after_cancel(self._fx_after)
+        self._fx_after = self.root.after(150, lambda: (setattr(self, "_fx_after", None), self._apply_fx(quiet=True),
+                                                        self._save()))
+
+    def toggle_fx(self):
+        self.v_fx.set("off" if self.v_fx.get() != "off" else self.last_fx)
+        self._apply_fx()
+
+    def set_fx_hotkey(self):
+        hk = self._ask_hotkey("ปุ่มลัด: สลับเปิด/ปิดเปลี่ยนเสียง")
+        if hk is None:
+            return
+        self.fx_hotkey = hk or None
+        self._update_fx_hotkey_btn()
+        self._rebind_hotkeys()
+        self._save()
+
+    def _update_fx_hotkey_btn(self):
+        self.btn_fx_hk.config(text=f"สลับ: {hotkey_text(self.fx_hotkey) or '-'}")
 
     # ---------- update
     def _auto_check_update(self):
@@ -718,6 +1096,7 @@ class SoundpadApp:
         apply_theme(self.root)
         style_window(self.root)
         self._style_tree_tags()
+        self._drop_highlight(False)
         self._update_status_style()
         self._update_theme_button()
         for cb in (self.cb_monitor, self.cb_cable, self.cb_mic):  # รายการ dropdown ที่สร้างไปแล้ว
@@ -736,6 +1115,7 @@ class SoundpadApp:
     def _style_tree_tags(self):
         self.tree.tag_configure("playing", background=T["playing"], foreground=T["playing_fg"])
         self.tree.tag_configure("paused", background=T["paused"], foreground=T["warn"])
+        self.tree.tag_configure("droptarget", background=T["hover"])
 
     def _update_status_style(self):
         kind = status_kind(self.v_status.get())
@@ -767,7 +1147,13 @@ class SoundpadApp:
             tag = ("paused",) if self.paused else ("playing",)
             for iid in self.tree.get_children():
                 self.tree.item(iid, tags=tag if int(iid) in playing else ())
-        if not playing and self.v_status.get().startswith("▶"):
+        for sid in list(self.looping - playing - self._stream_pending):
+            s = next((x for x in self.sounds if x["id"] == sid), None)
+            if s and s.get("url") and s.get("mode") == "loop" and not self.paused:
+                self._play_stream(s, restart=True)  # สตรีม YouTube วน: เล่นจบแล้วเริ่มรอบใหม่
+            else:
+                self.looping.discard(sid)  # เสียงวนที่หยุดไปแล้ว (เช่น เปลี่ยนอุปกรณ์)
+        if not playing and not self.looping and self.v_status.get().startswith("▶"):
             self.v_status.set("พร้อม")
         with self.stream_lock:  # สตรีมที่ ffmpeg จบแล้ว ไม่ต้องติดตามต่อ
             self.streams = [src for src in self.streams if not src.done]
@@ -782,8 +1168,12 @@ class SoundpadApp:
                 d = json.load(f)
         except Exception:
             return
+        self.categories = [c for c in d.get("categories", []) if isinstance(c, str) and c]
         for s in d.get("sounds", []):
-            item = {"id": self.next_id, "path": s.get("path"), "name": s["name"], "hotkey": s.get("hotkey")}
+            item = {"id": self.next_id, "path": s.get("path"), "name": s["name"], "hotkey": s.get("hotkey"),
+                    "category": s.get("category") if s.get("category") in self.categories else None,
+                    "fav": bool(s.get("fav")),
+                    "mode": s.get("mode") if s.get("mode") in MODE_ICONS else "normal"}
             if s.get("url"):
                 item.update(url=s["url"], start=s.get("start"), end=s.get("end"), length=s.get("length"))
             self.sounds.append(item)
@@ -793,17 +1183,23 @@ class SoundpadApp:
             if key in st:
                 var.set(st[key])
         self.stop_hotkey = d.get("stop_hotkey", self.stop_hotkey)
+        self.fx_hotkey = d.get("fx_hotkey")
+        if self.v_fx.get() not in EFFECTS:
+            self.v_fx.set("off")
         self.update_state.update(d.get("update") or {})
         self.saved_devices = d.get("devices", {})
 
     def _setting_vars(self):
         return {"monitor_vol": self.v_monitor_vol, "cable_vol": self.v_cable_vol, "mic_vol": self.v_mic_vol,
                 "to_me": self.v_to_me, "to_mic": self.v_to_mic, "passthrough": self.v_passthrough,
-                "stop_prev": self.v_stop_prev, "theme": self.v_theme, "auto_update": self.v_auto_update}
+                "stop_prev": self.v_stop_prev, "theme": self.v_theme, "auto_update": self.v_auto_update,
+                "tab": self.v_tab, "fx": self.v_fx, "fx_strength": self.v_fx_strength,
+                "fx_monitor": self.v_fx_monitor}
 
     @staticmethod
     def _sound_record(s):
-        rec = {"path": s["path"], "name": s["name"], "hotkey": s["hotkey"]}
+        rec = {"path": s["path"], "name": s["name"], "hotkey": s["hotkey"], "category": s.get("category"),
+               "fav": s.get("fav", False), "mode": s.get("mode", "normal")}
         if s.get("url"):
             rec.update(url=s["url"], start=s.get("start"), end=s.get("end"), length=s.get("length"))
         return rec
@@ -815,6 +1211,8 @@ class SoundpadApp:
             "sounds": [self._sound_record(s) for s in self.sounds],
             "settings": {k: v.get() for k, v in self._setting_vars().items()},
             "stop_hotkey": self.stop_hotkey,
+            "fx_hotkey": self.fx_hotkey,
+            "categories": self.categories,
             "update": self.update_state,
             "devices": {"monitor": self.cb_monitor.get(), "cable": self.cb_cable.get(), "mic": self.cb_mic.get()},
         }
