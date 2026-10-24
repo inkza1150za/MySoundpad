@@ -177,6 +177,33 @@ class OutputMixer:
         with self.lock:
             return [v[2] for v in self.voices]
 
+    def positions(self):
+        """[(sound_id, ตำแหน่ง วินาที, ความยาว วินาที หรือ None)] ของเสียงที่เล่นอยู่ เรียงตามลำดับที่เริ่มเล่น
+        (ความยาวรู้เฉพาะเสียงใน RAM สตรีม/เพลงยาวให้ผู้เรียกใช้ความยาวที่บันทึกไว้)"""
+        with self.lock:
+            return [(v[2], v[1] / self.sr, len(v[0]) / self.sr if isinstance(v[0], np.ndarray) else None)
+                    for v in self.voices if v[4] is None]
+
+    def sources(self, sound_id):
+        """ตัวถอดรหัส (StreamSource/FileSource) ของเสียงนี้ ไว้สร้างตัวใหม่ตอนกระโดดไปช่วงอื่น"""
+        with self.lock:
+            return [v[0] for v in self.voices if v[2] == sound_id and v[4] is None
+                    and not isinstance(v[0], np.ndarray)]
+
+    def seek(self, sound_id, seconds, replace=None):
+        """กระโดดไปตำแหน่งใหม่: เสียงใน RAM ย้ายตำแหน่งทันที ตัวถอดรหัสเปลี่ยนเป็นตัวใหม่จาก replace {id(ตัวเดิม): ตัวใหม่}
+        (ตัวใหม่สร้างไว้ก่อนนอก lock เพราะเปิด ffmpeg ช้า ไม่ให้ audio callback ต้องรอ)"""
+        with self.lock:
+            for v in self.voices:
+                if v[2] != sound_id or v[4] is not None:
+                    continue
+                if isinstance(v[0], np.ndarray):
+                    n, pos = len(v[0]), int(seconds * self.sr)
+                    v[1] = pos % n if v[3] and n else min(max(pos, 0), n)
+                elif replace and id(v[0]) in replace:
+                    v[0] = replace[id(v[0])]
+                    v[1] = v[0].offset
+
     def _cb(self, outdata, frames, t, status):
         out = np.zeros((frames, 2), np.float32)
         with self.lock:

@@ -113,7 +113,8 @@ def apply_theme(root):
     s.map("TMenubutton", background=[("pressed", bd), ("active", hv)], bordercolor=[("active", purple)],
           lightcolor=[("active", hv)], darkcolor=[("active", hv)], arrowcolor=[("active", T["pink_hi"])])
     for name, base, hi, lo in (("Pink", pink, T["pink_hi"], T["pink_lo"]),
-                               ("Purple", purple, T["purple_hi"], T["purple_lo"])):
+                               ("Purple", purple, T["purple_hi"], T["purple_lo"]),
+                               ("Danger", "#dc2626", "#ef4444", "#b91c1c")):  # ปุ่มยืนยันการลบ
         s.configure(f"{name}.TButton", background=base, foreground="#ffffff", bordercolor=base, lightcolor=base,
                     darkcolor=base, font=(FONT, 10, "bold"), padding=(14, 5))
         s.map(f"{name}.TButton", background=[("pressed", lo), ("active", hi)],
@@ -126,6 +127,7 @@ def apply_theme(root):
                     darkcolor=sf2, insertcolor=tx, arrowcolor=mu)
         s.map(w, bordercolor=[("focus", pink), ("hover", purple)], lightcolor=[("focus", pink)])
     s.configure("TEntry", padding=4)
+    s.configure("TCombobox", padding=(6, 4), arrowsize=15)  # ช่องเลือกสูงขึ้น ลูกศรใหญ่ขึ้น กดง่าย
     s.map("TCombobox", fieldbackground=[("readonly", sf2)], foreground=[("readonly", tx)],
           selectbackground=[("readonly", sf2)], selectforeground=[("readonly", tx)], background=[("active", hv)],
           bordercolor=[("focus", pink), ("hover", purple)])
@@ -169,6 +171,12 @@ def apply_theme(root):
 def style_window(win):
     """พื้นหลังตามธีม + แถบชื่อหน้าต่างมืด/สว่างตามธีม และขอบสีชมพู (สีแถบและขอบใช้ได้บน Windows 11)"""
     win.configure(bg=T["bg"])
+    _style_titlebar(win)
+    # หน้าต่างย่อยที่เพิ่งสร้าง: ตั้งสีตอนกรอบหน้าต่างยังวาดไม่เสร็จจะไม่ติด (แถบชื่อเป็นสีขาว) ตั้งซ้ำอีกครั้งหลังขึ้นจอ
+    win.after(60, lambda: win.winfo_exists() and _style_titlebar(win))
+
+
+def _style_titlebar(win):
     try:
         from ctypes import byref, c_int, sizeof, windll
         win.update_idletasks()

@@ -18,13 +18,16 @@ class StreamSource:
     ถอดรหัสล่วงหน้าไม่เกิน STREAM_AHEAD วินาที และทิ้งส่วนที่เล่นผ่านไปแล้ว RAM จึงคงที่แม้คลิปยาวเป็นชั่วโมง
     """
 
-    def __init__(self, url, headers, sr, start=None, end=None, network=True, loop=False):
+    def __init__(self, url, headers, sr, start=None, end=None, network=True, loop=False, offset=0):
+        """offset: เริ่มที่ frame นี้ของเสียง (กระโดดไปกลางเพลง) ตำแหน่งยังนับจากต้นเสียงเหมือนเดิม"""
         import imageio_ffmpeg
         self.sr = sr
+        self.args = (url, headers, start, end, network, loop)
+        self.offset = offset
         self.data = np.zeros((sr * (STREAM_AHEAD + STREAM_KEEP * 2), 2), np.float32)
-        self.base = 0      # ตำแหน่งของ data[0]
-        self.n = 0         # ถอดรหัสมาแล้วถึงตำแหน่งนี้
-        self.read_pos = 0  # ตำแหน่งที่เล่นไปไกลสุด
+        self.base = offset      # ตำแหน่งของ data[0]
+        self.n = offset         # ถอดรหัสมาแล้วถึงตำแหน่งนี้
+        self.read_pos = offset  # ตำแหน่งที่เล่นไปไกลสุด
         self.stopped = False
         self.done = False
         self.error = None
@@ -36,11 +39,15 @@ class StreamSource:
             cmd += ["-headers", "".join(f"{k}: {v}\r\n" for k, v in headers.items())]
         if loop:  # วนไฟล์ไม่รู้จบ ffmpeg ถอดรหัสต่อเนื่องจากท้ายไปหัว จึงไม่มีช่วงเงียบตรงรอยต่อ
             cmd += ["-stream_loop", "-1"]
-        if start is not None:
-            cmd += ["-ss", str(start)]
+        seek = (start or 0) + offset / sr
+        if seek and not loop:
+            cmd += ["-ss", f"{seek:.3f}"]
         if end is not None:
             cmd += ["-to", str(end)]
-        cmd += ["-i", url, "-vn", "-ac", "2", "-ar", str(sr), "-f", "f32le", "-"]
+        cmd += ["-i", url, "-vn", "-ac", "2", "-ar", str(sr)]
+        if seek and loop:  # -ss ฝั่ง input ใช้กับ -stream_loop ไม่ได้ (วนกลับผิดที่) จึงถอดรหัสแล้วข้ามทิ้งแทน
+            cmd += ["-ss", f"{seek:.3f}"]
+        cmd += ["-f", "f32le", "-"]
         self.proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW)
         threading.Thread(target=self._reader, daemon=True).start()
@@ -73,7 +80,7 @@ class StreamSource:
                     self.data[self.n - self.base:end] = frames
                     self.n += len(frames)
             self.proc.wait()
-            if self.proc.returncode not in (0, None) and self.n == 0:
+            if self.proc.returncode not in (0, None) and self.n == self.offset:
                 err = self.proc.stderr.read().decode("utf-8", "replace").strip()
                 self.error = err[-200:] or f"ffmpeg exit {self.proc.returncode}"
         except Exception as e:
@@ -96,6 +103,11 @@ class StreamSource:
         if self.proc.poll() is None:
             self.proc.kill()
 
+    def reopen(self, offset):
+        """ตัวถอดรหัสใหม่ที่เริ่มจาก frame offset (กระโดดไปช่วงอื่นของเพลง)"""
+        url, headers, start, end, network, loop = self.args
+        return StreamSource(url, headers, self.sr, start, end, network, loop, offset)
+
 
 class FileSource:
     """เพลงยาวจากไฟล์ในเครื่อง: อ่านจากดิสก์ทีละช่วงด้วย ffmpeg (RAM คงที่ ~14 MB ไม่ว่าเพลงยาวแค่ไหน)
@@ -105,14 +117,22 @@ class FileSource:
     รอยต่อจึงตรงกันทุก sample
     """
 
-    def __init__(self, path, sr, loop=False):
+    def __init__(self, path, sr, loop=False, offset=0):
         self.key = (path, sr)
         self.sr = sr
+        self.loop = loop
         self.head = _head_cache.get(self.key)  # int16 หรือ None (ยังไม่เคยเล่น)
         if self.head is not None:
             _head_cache.move_to_end(self.key)
         self.head_frames = sr * HEAD_SECONDS
-        self.stream = StreamSource(path, None, sr, network=False, loop=loop)
+        self.stream = StreamSource(path, None, sr, network=False, loop=loop, offset=offset)
+
+    @property
+    def offset(self):
+        return self.stream.offset
+
+    def reopen(self, offset):
+        return FileSource(self.key[0], self.sr, self.loop, offset)
 
     @property
     def done(self):

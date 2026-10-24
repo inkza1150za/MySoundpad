@@ -3,9 +3,11 @@
 ไม่บล็อกหน้าจอหลัก (เปิดค้างไว้แล้วใช้แอปต่อได้) ค่าในแถบส่งไปที่ SoundpadApp ซึ่งเป็นเจ้าของสถานะเสียงทั้งหมด
 """
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk
 
-from ..theme import style_window
+from ..theme import FONT, style_window
+from . import msgbox
+from .popup_menu import attach_dropdown
 from ..voicefx import DEFAULT_PARAMS, PERCENT_KEYS, PRESETS, SLIDERS
 
 # จัดกลุ่มแถบเป็น 2 คอลัมน์ให้สูงใกล้กัน
@@ -52,8 +54,9 @@ class VoiceWindow(tk.Toplevel):
         top = ttk.Frame(frm)
         top.pack(fill="x")
         ttk.Label(top, text="ชุดเสียง").pack(side="left")
-        self.cb_preset = ttk.Combobox(top, state="readonly", width=24)
+        self.cb_preset = ttk.Combobox(top, state="readonly", width=22, font=(FONT, 10))
         self.cb_preset.pack(side="left", padx=(8, 12))
+        attach_dropdown(self.cb_preset)
         self.cb_preset.bind("<<ComboboxSelected>>", self._on_pick)
         ttk.Checkbutton(top, text="เปิดเปลี่ยนเสียง", variable=app.v_fx_on, style="Chip.Toolbutton",
                         command=app._apply_fx).pack(side="left")
@@ -145,7 +148,8 @@ class VoiceWindow(tk.Toplevel):
     def _ask_name(self, title, initial=""):
         name = self.app._ask_text(title, initial)
         if name and (name in self.app.voice_presets) and name != initial:
-            if not messagebox.askyesno(title, f"มีชุดเสียง '{name}' อยู่แล้ว บันทึกทับไหม?", parent=self):
+            if not msgbox.askyesno(title, f"มีชุดเสียง '{name}' อยู่แล้ว บันทึกทับไหม?", parent=self,
+                                   yes="บันทึกทับ", danger=True):
                 return None
         return name
 
@@ -166,7 +170,7 @@ class VoiceWindow(tk.Toplevel):
 
     def delete(self):
         name = self.app.v_fx_preset.get()[2:]
-        if messagebox.askyesno("ลบชุดเสียง", f"ลบชุดเสียง '{name}'?", parent=self):
+        if msgbox.askyesno("ลบชุดเสียง", f"ลบชุดเสียง '{name}'?", parent=self, yes="🗑 ลบ", danger=True):
             self.app.voice_presets.pop(name, None)
             self.app.set_fx_custom(self.app.fx_params)  # เสียงที่ได้ยินอยู่ไม่เปลี่ยน แค่ไม่มีชื่อแล้ว
 

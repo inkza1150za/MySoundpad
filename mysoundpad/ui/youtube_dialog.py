@@ -4,13 +4,14 @@
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk
 
 from ..audio import OutputMixer
 from ..config import STREAM_TIMEOUT, YT_URL_RE
 from ..streaming import StreamSource
 from ..theme import T, style_window
 from ..youtube import _stream_url_cache, friendly_yt_error, parse_time, youtube_info, youtube_stream_url
+from . import msgbox
 
 
 def fmt_time(sec):
@@ -543,7 +544,7 @@ class YouTubeDialog(tk.Toplevel):
     def _ok(self):
         url = self.v_url.get().strip()
         if not YT_URL_RE.match(url):
-            messagebox.showwarning("ลิงก์ไม่ถูกต้อง", "ใส่ลิงก์ youtube.com หรือ youtu.be", parent=self)
+            msgbox.showwarning("ลิงก์ไม่ถูกต้อง", "ใส่ลิงก์ youtube.com หรือ youtu.be", parent=self)
             return
         if self._ready():
             self._commit_entries()
