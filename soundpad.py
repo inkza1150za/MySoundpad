@@ -4,8 +4,13 @@
 ดึงเสียงจาก YouTube (ไม่บังคับ): pip install yt-dlp imageio-ffmpeg
 ใช้กับ Discord/เกม: ติดตั้ง VB-CABLE แล้วตั้งไมค์ในแอปนั้นเป็น "CABLE Output"
 """
-import json
 import os
+
+# numpy (OpenBLAS) จองหน่วยความจำล่วงหน้าให้ทุก CPU thread (~500 MB บนเครื่อง 16 thread)
+# ทั้งที่แอปไม่ได้คำนวณเมทริกซ์เลย -> จำกัดเหลือ 1 thread (ต้องตั้งก่อน import numpy)
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
+import json
 import re
 import subprocess
 import sys
@@ -232,12 +237,29 @@ def find_resource(name):
 
 # ---------------------------------------------------------------- audio utils
 
-CACHE_LIMIT = 256 * 2**20  # bytes
+CACHE_LIMIT = 128 * 2**20  # bytes (เก็บเฉพาะเสียงสั้น แบบ 16-bit)
 _cache = OrderedDict()  # LRU: ตัวที่เพิ่งใช้อยู่ท้ายสุด
+LONG_SOUND_SECONDS = 30  # ไฟล์ยาวกว่านี้อ่านจากดิสก์ทีละช่วง (FileSource) แทนการโหลดทั้งไฟล์เข้า RAM
+HEAD_SECONDS = 2         # เก็บต้นเพลงยาวไว้ใน RAM ให้กดซ้ำแล้วออกทันที
+HEAD_CACHE_LIMIT = 32 * 2**20
+_head_cache = OrderedDict()
+
+
+def _cache_put(cache, key, data, limit):
+    cache[key] = data
+    total = sum(d.nbytes for d in cache.values())
+    while total > limit and len(cache) > 1:
+        _, old = cache.popitem(last=False)  # เสียงที่กำลังเล่นยังอยู่ใน voices ไม่หาย
+        total -= old.nbytes
+
+
+def to_int16(x):
+    """float32 [-1,1] -> int16 (ใช้ RAM ครึ่งเดียว; แปลงกลับตอนผสมเสียงทีละช่วงเล็กๆ)"""
+    return np.round(np.clip(x, -1.0, 1.0) * 32767).astype(np.int16)
 
 
 def load_audio(path, target_sr):
-    """อ่านไฟล์เป็น stereo float32 ที่ sample rate ของอุปกรณ์ (มี cache จำกัดขนาด)"""
+    """อ่านไฟล์เป็น stereo int16 ที่ sample rate ของอุปกรณ์ (มี cache จำกัดขนาด)"""
     key = (path, target_sr)
     if key in _cache:
         _cache.move_to_end(key)
@@ -252,12 +274,8 @@ def load_audio(path, target_sr):
         x_old = np.arange(len(data))
         x_new = np.linspace(0, len(data) - 1, n)
         data = np.stack([np.interp(x_new, x_old, data[:, c]) for c in range(2)], axis=1)
-    data = np.ascontiguousarray(data, dtype=np.float32)
-    _cache[key] = data
-    total = sum(d.nbytes for d in _cache.values())
-    while total > CACHE_LIMIT and len(_cache) > 1:
-        _, old = _cache.popitem(last=False)  # เสียงที่กำลังเล่นยังอยู่ใน voices ไม่หาย
-        total -= old.nbytes
+    data = np.ascontiguousarray(to_int16(data))
+    _cache_put(_cache, key, data, CACHE_LIMIT)
     return data
 
 
@@ -316,7 +334,7 @@ class StreamSource:
     ถอดรหัสล่วงหน้าไม่เกิน STREAM_AHEAD วินาที และทิ้งส่วนที่เล่นผ่านไปแล้ว RAM จึงคงที่แม้คลิปยาวเป็นชั่วโมง
     """
 
-    def __init__(self, url, headers, sr, start=None, end=None):
+    def __init__(self, url, headers, sr, start=None, end=None, network=True):
         import imageio_ffmpeg
         self.sr = sr
         self.data = np.zeros((sr * (STREAM_AHEAD + STREAM_KEEP * 2), 2), np.float32)
@@ -327,8 +345,9 @@ class StreamSource:
         self.done = False
         self.error = None
         self.lock = threading.Lock()
-        cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-loglevel", "error",
-               "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]
+        cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-loglevel", "error"]
+        if network:  # ตัวเลือก reconnect ใช้ได้เฉพาะ http (ไฟล์ในเครื่องไม่ต้องใช้)
+            cmd += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]
         if headers:
             cmd += ["-headers", "".join(f"{k}: {v}\r\n" for k, v in headers.items())]
         if start is not None:
@@ -392,6 +411,56 @@ class StreamSource:
             self.proc.kill()
 
 
+class FileSource:
+    """เพลงยาวจากไฟล์ในเครื่อง: อ่านจากดิสก์ทีละช่วงด้วย ffmpeg (RAM คงที่ ~14 MB ไม่ว่าเพลงยาวแค่ไหน)
+
+    ต้นเพลง HEAD_SECONDS วินาทีแรกเก็บไว้ใน RAM ตั้งแต่เล่นครั้งแรก ครั้งต่อไปจึงเริ่มเล่นทันที
+    ระหว่างที่ ffmpeg เริ่มถอดรหัสจากต้นเพลงอยู่เบื้องหลัง ต้นเพลงกับส่วนที่เหลือมาจาก ffmpeg ตัวเดียวกัน
+    รอยต่อจึงตรงกันทุก sample
+    """
+
+    def __init__(self, path, sr):
+        self.key = (path, sr)
+        self.sr = sr
+        self.head = _head_cache.get(self.key)  # int16 หรือ None (ยังไม่เคยเล่น)
+        if self.head is not None:
+            _head_cache.move_to_end(self.key)
+        self.head_frames = sr * HEAD_SECONDS
+        self.stream = StreamSource(path, None, sr, network=False)
+
+    @property
+    def done(self):
+        return self.stream.done
+
+    @property
+    def error(self):
+        return self.stream.error
+
+    def read(self, pos, frames):
+        if self.head is None:
+            self._save_head()
+        elif pos < len(self.head):
+            chunk = self.head[pos:pos + frames].astype(np.float32) * (1 / 32768)
+            if len(chunk) < frames:  # คร่อมรอยต่อ: ต่อด้วยข้อมูลจาก ffmpeg
+                rest = self.stream.read(pos + len(chunk), frames - len(chunk))
+                chunk = np.concatenate([chunk, rest])
+            return chunk
+        return self.stream.read(pos, frames)
+
+    def _save_head(self):
+        s = self.stream
+        with s.lock:
+            if s.base == 0 and s.n >= self.head_frames:
+                self.head = to_int16(s.data[:self.head_frames])
+                _cache_put(_head_cache, self.key, self.head, HEAD_CACHE_LIMIT)
+
+    def finished_at(self, pos):
+        return self.stream.finished_at(pos)
+
+    def stop(self):
+        self.stream.stop()
+
+
 _stream_url_cache = {}  # ลิงก์ YouTube -> (url เสียงจริง, headers, หมดอายุ unix time)
 
 
@@ -423,7 +492,7 @@ class OutputMixer:
         self.channels = min(2, info["max_output_channels"])
         self.get_volume = get_volume
         self.mic = mic
-        self.voices = []  # [data (ndarray หรือ StreamSource), pos, sound_id]
+        self.voices = []  # [data (ndarray int16/float32 หรือ StreamSource/FileSource), pos, sound_id]
         self.paused = False  # พัก: เก็บตำแหน่งเสียงไว้ ไม่เดินหน้า (เสียงไมค์จริงยังผ่านตามปกติ)
         self.lock = threading.Lock()
         self.stream = sd.OutputStream(device=device, samplerate=self.sr, channels=self.channels,
@@ -449,12 +518,14 @@ class OutputMixer:
                 alive = []
                 for v in self.voices:
                     data, pos = v[0], v[1]
-                    if isinstance(data, StreamSource):
+                    if not isinstance(data, np.ndarray):  # StreamSource / FileSource
                         chunk = data.read(pos, frames)  # ข้อมูลมาไม่ทัน = เงียบชั่วครู่ ไม่ข้ามเสียง
                         v[1] = pos + len(chunk)
                         finished = data.finished_at(v[1])
                     else:
                         chunk = data[pos:pos + frames]
+                        if chunk.dtype == np.int16:
+                            chunk = chunk.astype(np.float32) * (1 / 32768)
                         v[1] = pos + frames
                         finished = v[1] >= len(data)
                     out[:len(chunk)] += chunk
@@ -1346,6 +1417,7 @@ class SoundpadApp:
         self.stream_lock = threading.Lock()
         self.stream_gen = 0  # เพิ่มทุกครั้งที่กดหยุด เพื่อยกเลิกสตรีมที่ยังเชื่อมต่อไม่เสร็จ
         self.paused = False
+        self._row_state = None  # (เสียงที่เล่นอยู่, พักอยู่ไหม) ที่ระบายสีแถวไว้ล่าสุด
 
         self.v_monitor_vol = tk.DoubleVar(value=70)
         self.v_cable_vol = tk.DoubleVar(value=70)
@@ -1546,6 +1618,8 @@ class SoundpadApp:
 
     # ---------- engine
     def _apply_devices(self):
+        if hasattr(self, "btn_pause"):
+            self.stop_all()  # ปิด ffmpeg ของเพลงยาว/สตรีมที่เล่นค้างอยู่ด้วย ไม่งั้นจะค้างอยู่จนกดหยุด
         for obj in (self.monitor, self.cable, self.mic):
             if obj:
                 try:
@@ -1827,8 +1901,18 @@ class SoundpadApp:
             self.stop_all()
         self._set_paused(False, quiet=True)  # กดเล่นเสียงใหม่ระหว่างพัก = เลิกพัก
         try:
-            for m in self._targets():
-                m.play(load_audio(s["path"], m.sr), sid)
+            if (s.get("length") or 0) > LONG_SOUND_SECONDS:
+                # เพลงยาว: อ่านจากดิสก์ทีละช่วง ถอดรหัสครั้งเดียวต่อ sample rate แล้วแจกให้ทุกอุปกรณ์
+                sources = {}
+                for m in self._targets():
+                    if m.sr not in sources:
+                        sources[m.sr] = FileSource(s["path"], m.sr)
+                    m.play(sources[m.sr], sid)
+                with self.stream_lock:
+                    self.streams.extend(sources.values())
+            else:
+                for m in self._targets():
+                    m.play(load_audio(s["path"], m.sr), sid)
         except Exception as e:
             self.v_status.set(f"⚠ เปิดไฟล์ไม่ได้: {e}")
             return
@@ -1913,6 +1997,7 @@ class SoundpadApp:
     def _refresh_list(self):
         q = self.v_search.get().lower().strip()
         sel = self.tree.selection()
+        self._row_state = None  # แถวถูกสร้างใหม่ ให้ _tick ระบายสีอีกรอบ
         self.tree.delete(*self.tree.get_children())
         for i, s in enumerate(self.sounds, 1):
             if q and q not in s["name"].lower():
@@ -1982,9 +2067,12 @@ class SoundpadApp:
         for m in (self.monitor, self.cable):
             if m:
                 playing.update(m.playing_ids())
-        tag = ("paused",) if self.paused else ("playing",)
-        for iid in self.tree.get_children():
-            self.tree.item(iid, tags=tag if int(iid) in playing else ())
+        state = (frozenset(playing), self.paused)
+        if state != self._row_state:  # ระบายสีแถวใหม่เฉพาะตอนมีอะไรเปลี่ยน (ประหยัด CPU ตอนเปิดทิ้งไว้)
+            self._row_state = state
+            tag = ("paused",) if self.paused else ("playing",)
+            for iid in self.tree.get_children():
+                self.tree.item(iid, tags=tag if int(iid) in playing else ())
         if not playing and self.v_status.get().startswith("▶"):
             self.v_status.set("พร้อม")
         with self.stream_lock:  # สตรีมที่ ffmpeg จบแล้ว ไม่ต้องติดตามต่อ
