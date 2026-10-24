@@ -107,6 +107,11 @@ def apply_theme(root):
           foreground=[("disabled", T["faint"])], bordercolor=[("active", purple)],
           lightcolor=[("active", hv)], darkcolor=[("active", hv)])
     s.configure("Big.TButton", font=(FONT, 10, "bold"))
+    # ปุ่มเมนูเลือก (ชุดเสียง): หน้าตาเหมือนปุ่มปกติ + ลูกศร
+    s.configure("TMenubutton", background=sf2, foreground=tx, bordercolor=bd, lightcolor=sf2, darkcolor=sf2,
+                arrowcolor=mu, padding=(10, 5))
+    s.map("TMenubutton", background=[("pressed", bd), ("active", hv)], bordercolor=[("active", purple)],
+          lightcolor=[("active", hv)], darkcolor=[("active", hv)], arrowcolor=[("active", T["pink_hi"])])
     for name, base, hi, lo in (("Pink", pink, T["pink_hi"], T["pink_lo"]),
                                ("Purple", purple, T["purple_hi"], T["purple_lo"])):
         s.configure(f"{name}.TButton", background=base, foreground="#ffffff", bordercolor=base, lightcolor=base,
@@ -192,13 +197,13 @@ def set_app_icon(root):
         windll.shell32.SetCurrentProcessExplicitAppUserModelID(f"{APP_NAME}.App")
     except Exception:
         pass
-    ico, png = find_resource("icon.ico"), find_resource("icon.png")
+    ico = find_resource("icon.ico")
     try:
         if ico:
-            root.iconbitmap(default=ico)  # default = ใช้กับ Toplevel ทุกตัวที่สร้างภายหลังด้วย
-        if png:
-            root._app_icon = tk.PhotoImage(file=png)  # เก็บ ref กันโดนเก็บขยะ
-            root.iconphoto(True, root._app_icon)      # True = ใช้กับหน้าต่างย่อยด้วย / ไอคอนใหญ่บน taskbar
+            # ใช้ .ico ที่มีครบทุกขนาด Windows เลือกขนาดที่ตรงพอดี (taskbar / แถบชื่อ / Alt+Tab) ไม่ต้องย่อเอง
+            # ไม่ใช้ iconphoto กับ PNG 256 px เพราะ Windows ต้องย่อรูปใหญ่รูปเดียวลง ทำให้ไอคอนบน taskbar เบลอ
+            # default = ใช้กับ Toplevel ทุกตัวที่สร้างภายหลังด้วย
+            root.iconbitmap(default=ico)
     except tk.TclError:
         pass
 

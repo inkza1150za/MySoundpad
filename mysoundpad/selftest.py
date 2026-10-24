@@ -97,13 +97,17 @@ def selftest(out_path):
     check("drag & drop", drag_and_drop)
 
     def voice_changer():
-        from .voicefx import VoiceFX
+        from .voicefx import PRESETS, VoiceChain, preset_params
         sr = 44100
         x = (0.4 * np.sin(np.arange(sr) * 2 * np.pi * 220 / sr)).astype(np.float32)
-        fx = VoiceFX(sr, "pitch_up", 0.6)
+        fx = VoiceChain(sr, preset_params("pitch_up"))
         y = np.concatenate([fx.process(x[i:i + 512]) for i in range(0, sr - 512, 512)])[sr // 4:]
         peak = np.fft.rfftfreq(len(y), 1 / sr)[np.argmax(np.abs(np.fft.rfft(y)))]
-        return f"220 Hz -> {peak:.0f} Hz" if peak > 280 else 1 / 0
+        for key in PRESETS:  # ทุกชุดเสียงต้องได้เสียงที่ใช้ได้ (ไม่มี NaN/inf)
+            ch = VoiceChain(sr, preset_params(key))
+            if not np.isfinite(np.concatenate([ch.process(x[i:i + 512]) for i in range(0, 8192, 512)])).all():
+                raise ValueError(key)
+        return f"220 Hz -> {peak:.0f} Hz, {len(PRESETS)} presets ok" if peak > 280 else 1 / 0
     check("voice changer", voice_changer)
 
     with open(out_path, "w", encoding="utf-8") as f:

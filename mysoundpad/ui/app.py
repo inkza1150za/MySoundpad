@@ -15,11 +15,12 @@ from .. import config
 from ..audio import LONG_SOUND_SECONDS, MicPassthrough, MonitorTap, OutputMixer, list_devices, load_audio
 from ..config import (APP_NAME, APP_VERSION, AUDIO_EXT, STREAM_PREBUFFER, STREAM_TIMEOUT, UPDATE_CHECK_HOURS,
                       YT_MAX_MINUTES, YT_URL_RE)
-from ..voicefx import EFFECTS, VoiceFX
+from ..voicefx import DEFAULT_PARAMS, PRESETS, VoiceChain, preset_params
 from ..hotkeys import HotkeyManager, hotkey_key, hotkey_text
 from ..streaming import FileSource, StreamSource
 from ..theme import FONT, STATUS_LABELS, T, apply_theme, find_resource, set_app_icon, status_kind, style_window, use_theme
 from .dialogs import HotkeyDialog, UpdateDialog
+from .voice_dialog import CUSTOM, VoiceWindow
 from .youtube_dialog import YouTubeDialog
 from ..updater import check_for_update, run_installer
 from ..youtube import _stream_url_cache, download_latest_ytdlp, friendly_yt_error, import_ytdlp, youtube_download, youtube_info, youtube_stream_url
@@ -44,12 +45,14 @@ class SoundpadApp:
         self.looping = set()  # id เสียงโหมดวนที่กำลังเล่น (กดปุ่มลัดซ้ำ = หยุด)
         self._stream_pending = set()  # id เสียงสตรีมที่กำลังเชื่อมต่อ (ไม่ต้องเริ่มวนซ้ำระหว่างนี้)
         self._drag = None  # สถานะการลากเรียงลำดับในรายการ
-        self.v_fx = tk.StringVar(value="off")
-        self.v_fx_strength = tk.DoubleVar(value=60)
+        self.v_fx_on = tk.BooleanVar(value=False)
+        self.v_fx_preset = tk.StringVar(value="robot")  # คีย์ใน PRESETS / "u:ชื่อ" (ชุดของผู้ใช้) / CUSTOM
+        self.fx_params = preset_params("robot")  # ค่าที่ใช้อยู่จริง (ปุ่มลัดสลับเสียงจะเปิดค่านี้)
+        self.voice_presets = {}  # ชุดเสียงที่ผู้ใช้บันทึก: ชื่อ -> ค่า
         self.v_fx_monitor = tk.BooleanVar(value=False)
         self.fx_hotkey = None
-        self.last_fx = "pitch_up"  # ปุ่มลัดสลับเสียงจะเปิดเอฟเฟกต์ล่าสุดที่ใช้
         self._fx_after = None
+        self._voice_win = None
         self.monitor = None
         self.cable = None
         self.mic = None
@@ -186,19 +189,19 @@ class SoundpadApp:
         fxbar = ttk.Frame(self.root, padding=(12, 8, 12, 0))
         fxbar.pack(fill="x")
         ttk.Label(fxbar, text="🤖 เปลี่ยนเสียง").pack(side="left", padx=(0, 8))
-        for key, label in EFFECTS.items():
-            ttk.Radiobutton(fxbar, text=label, value=key, variable=self.v_fx, style="Chip.Toolbutton",
-                            command=self._apply_fx).pack(side="left", padx=(0, 4))
+        ttk.Checkbutton(fxbar, text="เปิดใช้", variable=self.v_fx_on, style="Chip.Toolbutton",
+                        command=self._apply_fx).pack(side="left", padx=(0, 6))
+        self.fx_menu = self._menu()
+        self.btn_fx_preset = ttk.Menubutton(fxbar, menu=self.fx_menu, width=18)
+        self.btn_fx_preset.pack(side="left", padx=(0, 6))
+        self.fx_menu.config(postcommand=self._build_fx_menu)
+        ttk.Button(fxbar, text="🎛 ปรับเอง", command=self.open_voice_window).pack(side="left")
         self.btn_fx_hk = ttk.Button(fxbar, command=self.set_fx_hotkey)
         self.btn_fx_hk.pack(side="right")
         ttk.Checkbutton(fxbar, text="ฟังเสียงตัวเอง", variable=self.v_fx_monitor,
                         command=self._apply_fx).pack(side="right", padx=(8, 8))
-        self.v_fx_pct = tk.StringVar()
-        ttk.Label(fxbar, textvariable=self.v_fx_pct, width=5).pack(side="right")
-        ttk.Scale(fxbar, from_=0, to=100, variable=self.v_fx_strength, length=110).pack(side="right", padx=(4, 2))
-        ttk.Label(fxbar, text="ความแรง").pack(side="right", padx=(12, 0))
-        self.v_fx_strength.trace_add("write", lambda *_: self._fx_strength_changed())
-        self.v_fx_pct.set(f"{round(self.v_fx_strength.get())}%")
+        self._build_fx_menu()
+        self._update_fx_label()
         self._update_fx_hotkey_btn()
 
         # ---- settings
@@ -986,33 +989,92 @@ class SoundpadApp:
         return event.action
 
     # ---------- เปลี่ยนเสียงพูด
+    def _fx_label(self, key=None):
+        key = key or self.v_fx_preset.get()
+        if key in PRESETS:
+            return PRESETS[key][0]
+        if key.startswith("u:"):
+            return "⭐ " + key[2:]
+        return "🎛 กำหนดเอง"
+
+    def _update_fx_label(self):
+        self.btn_fx_preset.config(text=self._fx_label())
+
+    def _build_fx_menu(self):
+        """เมนูชุดเสียง: สำเร็จรูป + ที่ผู้ใช้บันทึก (สร้างใหม่ทุกครั้งที่เปิด สีจึงตรงกับธีมปัจจุบันเสมอ)"""
+        m = self.fx_menu
+        m.config(bg=T["surface"], fg=T["text"], activebackground=T["sel"], selectcolor=T["pink"])
+        m.delete(0, "end")
+        for key, (label, _) in PRESETS.items():
+            m.add_radiobutton(label=label, value=key, variable=self.v_fx_preset,
+                              command=lambda k=key: self.select_fx_preset(k))
+        if self.voice_presets:
+            m.add_separator()
+            for name in self.voice_presets:
+                m.add_radiobutton(label="⭐ " + name, value="u:" + name, variable=self.v_fx_preset,
+                                  command=lambda k="u:" + name: self.select_fx_preset(k))
+        m.add_separator()
+        m.add_command(label="🎛 ปรับเอง / บันทึกชุดใหม่...", command=self.open_voice_window)
+
+    def select_fx_preset(self, key):
+        """เลือกชุดเสียง แล้วเปิดเปลี่ยนเสียงให้ทันที"""
+        self.v_fx_preset.set(key)
+        self.fx_params = preset_params(key, self.voice_presets)
+        self.v_fx_on.set(True)
+        self._update_fx_label()
+        self._apply_fx()
+        if self._voice_win:
+            self._voice_win.load_from_app()
+
+    def set_fx_custom(self, params, refresh=True):
+        """ค่าจากแถบเลื่อนในหน้าต่างปรับเสียง (ได้ยินทันที บันทึกลงไฟล์หลังหยุดลาก)"""
+        self.fx_params = dict(params)
+        self.v_fx_preset.set(CUSTOM)
+        self.v_fx_on.set(True)
+        self._update_fx_label()
+        self._apply_fx(quiet=True)
+        self.v_status.set(f"🤖 เปลี่ยนเสียง: {self._fx_label()}")
+        if self._fx_after:
+            self.root.after_cancel(self._fx_after)
+        self._fx_after = self.root.after(600, lambda: (setattr(self, "_fx_after", None), self._save()))
+        if refresh and self._voice_win:
+            self._voice_win.load_from_app()
+
+    def open_voice_window(self):
+        if self._voice_win and self._voice_win.winfo_exists():
+            self._voice_win.lift()
+            self._voice_win.focus_set()
+            return
+        self._voice_win = VoiceWindow(self)
+        self._voice_win.bind("<Destroy>", lambda e: e.widget is self._voice_win and self._on_voice_win_closed())
+
+    def _on_voice_win_closed(self):
+        self._voice_win = None
+        self._save()
+
     def _apply_fx(self, quiet=False):
-        name = self.v_fx.get()
-        if name != "off":
-            self.last_fx = name
+        on = self.v_fx_on.get()
         mic = self.mic
         if mic:
-            mic.fx = VoiceFX(mic.sr, name, self.v_fx_strength.get() / 100) if name != "off" else None
+            if not on:
+                mic.fx = None
+            elif mic.fx is not None and mic.fx.sr == mic.sr:
+                mic.fx.set_params(self.fx_params)  # ปรับค่าในตัวเดิม เสียงต่อเนื่องไม่สะดุด
+            else:
+                mic.fx = VoiceChain(mic.sr, self.fx_params)
             mic.monitor_on = self.v_fx_monitor.get()
         if self.monitor:
             listen = mic and self.v_fx_monitor.get() and self.monitor.sr == mic.sr
             self.monitor.mic = MonitorTap(mic) if listen else None
         if not quiet:
-            if name != "off" and not mic:
+            if on and not mic:
                 self.v_status.set("ยังไม่ได้เปิด 'ส่งเสียงไมค์จริงผ่านด้วย' — เปลี่ยนเสียงต้องใช้เสียงไมค์จริง")
             else:
-                self.v_status.set(f"🤖 เปลี่ยนเสียง: {EFFECTS[name]}" if name != "off" else "พร้อม")
+                self.v_status.set(f"🤖 เปลี่ยนเสียง: {self._fx_label()}" if on else "พร้อม")
             self._save()
 
-    def _fx_strength_changed(self):
-        self.v_fx_pct.set(f"{round(self.v_fx_strength.get())}%")
-        if self._fx_after:  # ลากแถบอยู่: รอหยุดลากก่อนค่อยสร้างเอฟเฟกต์ใหม่
-            self.root.after_cancel(self._fx_after)
-        self._fx_after = self.root.after(150, lambda: (setattr(self, "_fx_after", None), self._apply_fx(quiet=True),
-                                                        self._save()))
-
     def toggle_fx(self):
-        self.v_fx.set("off" if self.v_fx.get() != "off" else self.last_fx)
+        self.v_fx_on.set(not self.v_fx_on.get())
         self._apply_fx()
 
     def set_fx_hotkey(self):
@@ -1099,6 +1161,8 @@ class SoundpadApp:
         self._drop_highlight(False)
         self._update_status_style()
         self._update_theme_button()
+        if self._voice_win:
+            style_window(self._voice_win)
         for cb in (self.cb_monitor, self.cb_cable, self.cb_mic):  # รายการ dropdown ที่สร้างไปแล้ว
             try:
                 lb = f"{self.root.tk.call('ttk::combobox::PopdownWindow', cb)}.f.l"
@@ -1184,8 +1248,7 @@ class SoundpadApp:
                 var.set(st[key])
         self.stop_hotkey = d.get("stop_hotkey", self.stop_hotkey)
         self.fx_hotkey = d.get("fx_hotkey")
-        if self.v_fx.get() not in EFFECTS:
-            self.v_fx.set("off")
+        self._load_fx(d, st)
         self.update_state.update(d.get("update") or {})
         self.saved_devices = d.get("devices", {})
 
@@ -1193,8 +1256,33 @@ class SoundpadApp:
         return {"monitor_vol": self.v_monitor_vol, "cable_vol": self.v_cable_vol, "mic_vol": self.v_mic_vol,
                 "to_me": self.v_to_me, "to_mic": self.v_to_mic, "passthrough": self.v_passthrough,
                 "stop_prev": self.v_stop_prev, "theme": self.v_theme, "auto_update": self.v_auto_update,
-                "tab": self.v_tab, "fx": self.v_fx, "fx_strength": self.v_fx_strength,
-                "fx_monitor": self.v_fx_monitor}
+                "tab": self.v_tab, "fx_on": self.v_fx_on, "fx_monitor": self.v_fx_monitor}
+
+    @staticmethod
+    def _clean_params(p):
+        out = {}
+        for k, v in (p or {}).items():
+            try:
+                if k in DEFAULT_PARAMS:
+                    out[k] = float(v)
+            except (TypeError, ValueError):
+                pass
+        return out
+
+    def _load_fx(self, d, st):
+        self.voice_presets = {str(n): self._clean_params(p) for n, p in (d.get("voice_presets") or {}).items()
+                              if n and isinstance(p, dict)}
+        key = d.get("fx_preset")
+        if "fx_on" not in st and st.get("fx") in PRESETS:  # ไฟล์ตั้งค่าของ 1.5.0: "fx" = ชื่อเอฟเฟกต์หรือ "off"
+            key = st["fx"]
+            self.v_fx_on.set(True)
+        if key == CUSTOM:
+            self.fx_params = dict(DEFAULT_PARAMS, **self._clean_params(d.get("fx_params")))
+        elif key in PRESETS or (isinstance(key, str) and key.startswith("u:") and key[2:] in self.voice_presets):
+            self.fx_params = preset_params(key, self.voice_presets)
+        else:
+            key = "robot"
+        self.v_fx_preset.set(key)
 
     @staticmethod
     def _sound_record(s):
@@ -1212,6 +1300,9 @@ class SoundpadApp:
             "settings": {k: v.get() for k, v in self._setting_vars().items()},
             "stop_hotkey": self.stop_hotkey,
             "fx_hotkey": self.fx_hotkey,
+            "fx_preset": self.v_fx_preset.get(),
+            "fx_params": self.fx_params,
+            "voice_presets": self.voice_presets,
             "categories": self.categories,
             "update": self.update_state,
             "devices": {"monitor": self.cb_monitor.get(), "cable": self.cb_cable.get(), "mic": self.cb_mic.get()},
