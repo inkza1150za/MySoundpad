@@ -3,8 +3,10 @@
 ตัวเลือกย่อย (โหมดเล่น / หมวด) แสดงเป็นชิปในเมนูเลย คลิกเดียวจบ
 ปิดเมื่อคลิกนอกเมนู, กด Esc หรือสลับไปโปรแกรมอื่น เลื่อนด้วยลูกศรขึ้นลงแล้วกด Enter ได้
 """
+import base64
 import tkinter as tk
 
+from .. import rounded
 from ..theme import FONT, T
 
 
@@ -31,6 +33,8 @@ class PopupMenu(tk.Toplevel):
         self.items = []  # [(แถว, คำสั่ง)] สำหรับเลื่อนด้วยลูกศร
         self.active = None
         self.selected = None  # แถวของค่าปัจจุบัน (dropdown) เปิดมาแล้วไฮไลต์ไว้ก่อน
+        self.f = rounded.scale(self)
+        self._imgs = {}  # รูปพื้นมุมโค้ง (ขนาด, สี) -> PhotoImage
         self.bind("<Escape>", lambda e: self.close())
         self.bind("<Up>", lambda e: self._step(-1))
         self.bind("<Down>", lambda e: self._step(1))
@@ -68,7 +72,8 @@ class PopupMenu(tk.Toplevel):
         if selected:
             self.selected = index
         self.items.append((row, command))
-        for w in (row, *parts):
+        row._hl = tk.Label(row, bd=0, highlightthickness=0, bg=T["surface"])  # พื้นไฮไลต์มุมโค้ง (_paint)
+        for w in (row, row._hl, *parts):
             w.bind("<Enter>", lambda e, i=index: self._highlight(i))
             w.bind("<ButtonRelease-1>", lambda e, c=command: self._run(c))
 
@@ -84,12 +89,15 @@ class PopupMenu(tk.Toplevel):
                 line, width = tk.Frame(wrap, bg=T["surface"]), 0
                 line.pack(anchor="w")
             on = value == current
-            base, fg = (T["pink"], "#ffffff") if on else (T["surface2"], T["text"])
-            chip = tk.Label(line, text=text, font=font, bg=base, fg=fg, padx=12, pady=4, cursor="hand2")
+            cw, ch = w - 6, round(27 * self.f)
+            pill = lambda color, cw=cw: self._rounded(cw, ch, ch / 2, color)  # ชิปทรงแคปซูล
+            chip = tk.Label(line, text=text, font=font, image=pill(T["pink"] if on else T["surface2"]),
+                            compound="center", fg="#ffffff" if on else T["text"], bg=T["surface"], bd=0,
+                            padx=0, pady=0, cursor="hand2")
             chip.pack(side="left", padx=(0, 6), pady=3)
             if not on:
-                chip.bind("<Enter>", lambda e, c=chip: c.config(bg=T["hover"]))
-                chip.bind("<Leave>", lambda e, c=chip: c.config(bg=T["surface2"]))
+                chip.bind("<Enter>", lambda e, c=chip, p=pill: c.config(image=p(T["hover"])))
+                chip.bind("<Leave>", lambda e, c=chip, p=pill: c.config(image=p(T["surface2"])))
             chip.bind("<ButtonRelease-1>", lambda e, v=value: self._run(lambda: command(v)))
             width += w + 6
 
@@ -103,7 +111,8 @@ class PopupMenu(tk.Toplevel):
         self.canvas.config(width=bw, height=min(bh, limit), scrollregion=(0, 0, bw, bh), yscrollincrement=12)
         if bh > limit:  # ยาวเกิน: มีแถบเลื่อน + เลื่อนด้วยลูกกลิ้งเมาส์ / ลูกศรได้
             from tkinter import ttk
-            self.scroll = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+            self.scroll = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview,
+                                        style="Popup.Vertical.TScrollbar")
             self.scroll.pack(side="right", fill="y", pady=1, padx=(0, 1))
             self.canvas.config(yscrollcommand=self.scroll.set)
         self.update_idletasks()
@@ -140,12 +149,33 @@ class PopupMenu(tk.Toplevel):
         if w is None or w.winfo_toplevel() is not self:
             self.close()
 
+    def _rounded(self, w, h, r, color):
+        """รูปพื้นมุมโค้งบนพื้นเมนู (เก็บไว้ใช้ซ้ำ)"""
+        key = (w, h, color)
+        if key not in self._imgs:
+            data = base64.b64encode(rounded._png(rounded.rect(w, h, r, color, T["surface"])))
+            self._imgs[key] = tk.PhotoImage(master=self, data=data, format="png")
+        return self._imgs[key]
+
+    def _paint(self, row, color):
+        """ไฮไลต์แถวด้วยพื้นมุมโค้ง (ตัวอักษรในแถวอยู่ห่างขอบ มุมโค้งจึงไม่ถูกบัง)"""
+        hl = row._hl
+        for w in row.winfo_children():
+            if w is not hl:
+                w.config(bg=color)
+        if color == T["surface"]:
+            hl.place_forget()
+        else:
+            hl.config(image=self._rounded(row.winfo_width(), row.winfo_height(), round(7 * self.f), color))
+            hl.place(x=0, y=0, relwidth=1, relheight=1)
+            hl.lower()
+
     def _highlight(self, index):
         if self.active is not None and self.active < len(self.items):
-            _paint(self.items[self.active][0], T["surface"])
+            self._paint(self.items[self.active][0], T["surface"])
         self.active = index
         row = self.items[index][0]
-        _paint(row, T["hover"])
+        self._paint(row, T["hover"])
         if self.scroll:  # เลื่อนให้แถวที่เลือกอยู่ในส่วนที่มองเห็น
             total = max(1, self.body.winfo_reqheight())
             view_top, view_h = self.canvas.canvasy(0), self.canvas.winfo_height()
@@ -176,12 +206,6 @@ def attach_dropdown(cb):
         return "break"
     for seq in ("<Button-1>", "<Alt-Down>", "<Down>", "<space>", "<Return>"):
         cb.bind(seq, open_list)
-
-
-def _paint(row, color):
-    row.config(bg=color)
-    for w in row.winfo_children():
-        w.config(bg=color)
 
 
 def _work_area(x, y, widget):

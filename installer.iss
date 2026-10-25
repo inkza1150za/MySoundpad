@@ -12,7 +12,7 @@
 ;   /datadir=PATH   ใช้โฟลเดอร์อื่นแทน %APPDATA%\MySoundpad (ใช้ทดสอบ ไม่แตะข้อมูลจริง)
 
 #define MyAppName "MySoundpad"
-#define MyAppVersion "1.6.0"
+#define MyAppVersion "1.7.0"
 #define MyAppExe "MySoundpad.exe"
 #define CableUrl "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip"
 #define CablePage "https://vb-audio.com/Cable/"

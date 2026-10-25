@@ -50,7 +50,7 @@ class SeekBar(tk.Canvas):
         self._drawn = state
         self.delete("all")
         self.config(bg=T["bg"])
-        self.create_line(x0, y, x1, y, width=6, capstyle="round", fill=T["surface2"])
+        self.create_line(x0, y, x1, y, width=6, capstyle="round", fill=T["surface2"] if T["dark"] else T["border"])
         if self.enabled:
             if x > x0:
                 self.create_line(x0, y, x, y, width=6, capstyle="round", fill=T["pink"])

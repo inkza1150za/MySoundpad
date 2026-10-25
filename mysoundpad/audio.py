@@ -122,7 +122,8 @@ class MicPassthrough:
         return chunk * self.get_volume()
 
     def close(self):
-        self.stream.stop()
+        # abort = ตัดเสียงทันที (stop จะรอเสียงที่ค้างในบัฟเฟอร์เล่นจนหมด ~0.2 วินาทีต่ออุปกรณ์ ปิดแอปแล้วค้าง)
+        self.stream.abort()
         self.stream.close()
 
 
@@ -248,7 +249,8 @@ class OutputMixer:
             outdata[:] = out
 
     def close(self):
-        self.stream.stop()
+        # abort = ตัดเสียงทันที (stop จะรอเสียงที่ค้างในบัฟเฟอร์เล่นจนหมด ~0.2 วินาทีต่ออุปกรณ์ ปิดแอปแล้วค้าง)
+        self.stream.abort()
         self.stream.close()
 
 

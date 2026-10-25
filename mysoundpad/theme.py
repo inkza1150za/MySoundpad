@@ -5,6 +5,7 @@ import os
 import tkinter as tk
 from tkinter import ttk
 
+from . import rounded
 from .config import APP_DIR, APP_NAME, RES_DIR
 
 
@@ -151,9 +152,8 @@ def apply_theme(root):
           lightcolor=[("selected", pink), ("active", hv)], darkcolor=[("selected", pink), ("active", hv)])
     s.configure("Horizontal.TProgressbar", background=pink, troughcolor=sf2, bordercolor=bd, lightcolor=pink,
                 darkcolor=pink)
-    s.configure("Horizontal.TScale", background=pink, troughcolor=sf2, bordercolor=bd, lightcolor=pink,
-                darkcolor=pink)
-    s.map("Horizontal.TScale", background=[("active", T["pink_hi"])])
+    s.configure("Horizontal.TScale", background=bg, troughcolor=sf2)  # รางและหัวจับเป็นรูปมุมมน (_rounded_styles)
+    s.map("Horizontal.TScale", background=[])
     s.configure("TLabelframe", background=bg, bordercolor=bd, lightcolor=bg, darkcolor=bg)
     s.configure("TLabelframe.Label", background=bg, foreground=T["purple_hi"], font=(FONT, 10, "bold"))
 
@@ -166,14 +166,201 @@ def apply_theme(root):
     s.configure("Vertical.TScrollbar", background=sf2, troughcolor=bg, bordercolor=bg, arrowcolor=mu,
                 lightcolor=sf2, darkcolor=sf2, gripcount=0)
     s.map("Vertical.TScrollbar", background=[("active", hv)])
+    _rounded_styles(root, s)
+
+
+# ---------- มุมมน: แทนพื้นหลังสี่เหลี่ยมของ ttk ด้วยรูปมุมโค้ง (ดู rounded.py)
+def _element(root, s, name, default, states=(), border=0, padding=None, sticky="nsew", stretch=True):
+    """สร้าง element รูปภาพครั้งแรก ครั้งต่อไป (สลับธีม) แค่เปลี่ยนภาพในรูปเดิม
+    states = [(สถานะ..., rgba)] เรียงตามลำดับความสำคัญ (ตัวแรกที่ตรงชนะ)"""
+    key = name.replace(".", "_")
+    img = rounded.photo(root, f"rr_{key}", default)
+    specs = [(*st[:-1], rounded.photo(root, f"rr_{key}_{i}", st[-1])) for i, st in enumerate(states)]
+    if name not in s.element_names():
+        opts = {"border": border, "sticky": sticky}
+        # ยืดได้: ขนาดขั้นต่ำมาจากเนื้อหา ไม่ใช่ขนาดรูป ("x"/"y" = ยืดแค่ด้านเดียว อีกด้านใช้ขนาดรูป)
+        if stretch in (True, "x"):
+            opts["width"] = 0
+        if stretch in (True, "y"):
+            opts["height"] = 0
+        if padding is not None:
+            opts["padding"] = padding
+        s.element_create(name, "image", img, *specs, **opts)
+
+
+def _swap(layout, mapping, drop=()):
+    """เปลี่ยนชื่อ element ใน layout (mapping) และเอา element ใน drop ออกโดยเก็บลูกไว้ (เช่น เส้นไข่ปลาตอนโฟกัส)"""
+    out = []
+    for name, opts in layout:
+        opts = dict(opts)
+        kids = opts.get("children")
+        if name in drop:
+            out.extend(_swap(kids, mapping, drop) if kids else [])
+            continue
+        if kids:
+            opts["children"] = _swap(kids, mapping, drop)
+        if name in mapping:
+            opts.pop("border", None)  # ขนาดขอบมาจากรูปแทน
+        out.append((mapping.get(name, name), opts))
+    return out
+
+
+def _rounded_styles(root, s):
+    f = rounded.scale(root)
+    px = lambda v: max(1, round(v * f))
+    bg, sf, sf2, hv, bd = T["bg"], T["surface"], T["surface2"], T["hover"], T["border"]
+    pink, purple = T["pink"], T["purple"]
+    ring = px(2)  # เส้นโฟกัส (แทนเส้นไข่ปลา)
+
+    def box(r, fill, border=None, bw=1, on=bg, mid=48):
+        # ส่วนกลางของรูปต้องกว้างพอ: ttk ยืดรูปด้วยการปูส่วนกลางซ้ำๆ ถ้าเล็ก (2 px) จะวาดหลายพันครั้งต่อรอบ ช้ามาก
+        size = 2 * (r + 1) + mid
+        return rounded.rect(size, size, r, fill, on, border, bw)
+
+    # ---- ปุ่ม: ปกติ / ชี้ / กด / โฟกัส (เส้นทึบ) / ปิดใช้งาน
+    r = px(7)
+    focus_drop = ("Button.focus", "Menubutton.focus", "Toolbutton.focus", "Checkbutton.focus",
+                  "Radiobutton.focus", "Horizontal.Scale.focus")
+
+    def button_states(fill, hover, press, hover_border, focus_ring):
+        return [("disabled", box(r, sf)), ("pressed", box(r, press)),
+                ("focus", "active", box(r, hover, focus_ring, ring)), ("focus", box(r, fill, focus_ring, ring)),
+                ("active", box(r, hover, hover_border))]
+    plain = button_states(sf2, hv, bd, purple, pink)
+    _element(root, s, "R.Button.border", box(r, sf2, bd), plain, border=r + 1, padding=px(2))
+    s.layout("TButton", _swap(s.layout("TButton"), {"Button.border": "R.Button.border"}, focus_drop))
+    for name, base, hi, lo in (("Pink", pink, T["pink_hi"], T["pink_lo"]),
+                               ("Purple", purple, T["purple_hi"], T["purple_lo"]),
+                               ("Danger", "#dc2626", "#ef4444", "#b91c1c")):
+        _element(root, s, f"R.{name}.border", box(r, base),
+                 button_states(base, hi, lo, hi, rounded.mix(base, "#ffffff", 0.75)), border=r + 1, padding=px(2))
+        s.layout(f"{name}.TButton", _swap(s.layout("TButton"), {"R.Button.border": f"R.{name}.border"}))
+    _element(root, s, "R.Menubutton.border", box(r, sf2, bd), plain, border=r + 1, padding=px(2))
+    s.layout("TMenubutton", _swap(s.layout("TMenubutton"), {"Menubutton.border": "R.Menubutton.border"}, focus_drop))
+
+    # ---- ชิป (แท็บหมวด / เปิดใช้): ทรงแคปซูล เลือกอยู่ = ชมพู
+    rc = px(11)
+    white_ring = rounded.mix(pink, "#ffffff", 0.75)
+    _element(root, s, "R.Chip.border", box(rc, sf2, bd), [
+        ("disabled", box(rc, sf)), ("pressed", "!selected", box(rc, bd)),
+        ("selected", "focus", box(rc, pink, white_ring, ring)), ("selected", "active", box(rc, T["pink_hi"])),
+        ("selected", box(rc, pink)),
+        ("focus", "active", box(rc, hv, pink, ring)), ("focus", box(rc, sf2, pink, ring)),
+        ("active", box(rc, hv, purple))], border=rc + 1, padding=px(2))
+    s.layout("Chip.Toolbutton", _swap(s.layout("Toolbutton"), {"Toolbutton.border": "R.Chip.border"}, focus_drop))
+
+    # ---- ช่องกรอก / ช่องเลือก / ช่องตัวเลข: ขอบม่วงตอนชี้ ชมพูตอนพิมพ์
+    rf = px(7)
+    field = [("disabled", box(rf, sf, bd)), ("focus", box(rf, sf2, pink, ring)), ("hover", box(rf, sf2, purple))]
+    _element(root, s, "R.field", box(rf, sf2, bd), field, border=rf + 1, padding=px(3))
+    s.layout("TEntry", _swap(s.layout("TEntry"), {"Entry.field": "R.field"}))
+    s.layout("TSpinbox", _swap(s.layout("TSpinbox"), {"Spinbox.field": "R.field"}))
+    s.layout("TCombobox", [("R.field", {"sticky": "nswe", "children": [  # ลูกศรอยู่ในกรอบโค้งด้วย
+        ("Combobox.downarrow", {"side": "right", "sticky": "ns"}),
+        ("Combobox.padding", {"sticky": "nswe", "children": [("Combobox.textarea", {"sticky": "nswe"})]})]})])
+    for w in ("TEntry", "TSpinbox", "TCombobox"):  # ลูกศรวาดบนพื้นช่องเดียวกัน ไม่มีกรอบของตัวเอง
+        s.configure(w, background=sf2, bordercolor=sf2, lightcolor=sf2, darkcolor=sf2)
+        s.map(w, bordercolor=[], lightcolor=[], background=[])
+    s.map("TCombobox", fieldbackground=[("readonly", sf2)], foreground=[("readonly", T["text"])],
+          selectbackground=[("readonly", sf2)], selectforeground=[("readonly", T["text"])],
+          arrowcolor=[("hover", T["pink_hi"])])
+
+    # ---- ช่องติ๊ก / ปุ่มเลือกวงกลม
+    cs, cr, gap = px(17), px(4), px(7)
+    tick = lambda fill, border=None, mark=None: rounded.check(cs, cr, fill, bg, border, px(1.5), mark, gap)
+    _element(root, s, "R.check", tick(sf2, bd), [
+        ("disabled", tick(sf, bd)), ("selected", "active", tick(T["pink_hi"], mark="#ffffff")),
+        ("selected", tick(pink, mark="#ffffff")), ("focus", tick(sf2, pink)), ("active", tick(sf2, purple))],
+        sticky="", stretch=False)
+    s.layout("TCheckbutton", _swap(s.layout("TCheckbutton"), {"Checkbutton.indicator": "R.check"}, focus_drop))
+    radio = lambda fill, border=None, center=None: rounded.dot(cs, fill, bg, border, px(1.5), center, gap)
+    _element(root, s, "R.radio", radio(sf2, bd), [
+        ("disabled", radio(sf, bd)), ("selected", radio(sf2, pink, "#ffffff" if T["dark"] else pink)),
+        ("focus", radio(sf2, pink)), ("active", radio(sf2, purple))], sticky="", stretch=False)
+    s.layout("TRadiobutton", _swap(s.layout("TRadiobutton"), {"Radiobutton.indicator": "R.radio"}, focus_drop))
+
+    # ---- แถบเลื่อน: รางโค้งบาง + หัวจับวงกลม
+    th = px(6)
+    track = sf2 if T["dark"] else bd  # ธีมสว่าง: สีพื้นช่องจางเกินไปบนพื้นขาว
+    _element(root, s, "R.scale.trough", rounded.rect(2 * th + 64, th, th / 2, track, bg), border=(th, 0, th, 0),
+             sticky="ew", padding=0, stretch="x")
+    ks = px(18)
+    knob = lambda border: rounded.dot(ks, "#ffffff", bg, border, px(2))
+    _element(root, s, "R.scale.slider", knob(pink), [("disabled", knob(bd)), ("pressed", knob(T["pink_lo"])),
+                                                     ("active", knob(T["pink_hi"]))], sticky="", stretch=False)
+    s.layout("Horizontal.TScale", _swap(s.layout("Horizontal.TScale"),
+                                        {"Horizontal.Scale.trough": "R.scale.trough",
+                                         "Horizontal.Scale.slider": "R.scale.slider"}, focus_drop))
+
+    # ---- หลอดดาวน์โหลด
+    ph = px(8)
+    _element(root, s, "R.progress.trough", rounded.rect(2 * ph + 64, ph, ph / 2, track, bg), border=(ph, 0, ph, 0),
+             padding=0, stretch="x")
+    _element(root, s, "R.progress.pbar", rounded.rect(2 * ph + 64, ph, ph / 2, pink, track), border=(ph, 0, ph, 0),
+             padding=0, stretch="x")
+    s.layout("Horizontal.TProgressbar", [("R.progress.trough", {"sticky": "nswe", "children": [
+        ("R.progress.pbar", {"side": "left", "sticky": "ns"})]})])
+
+    # ---- แถบเลื่อนรายการ: ตัวจับโค้งมน ไม่มีปุ่มลูกศร
+    # "Popup." = ในเมนู/รายการ dropdown ที่พื้นเป็นสี surface
+    sw = px(12)
+    for prefix, on in (("", bg), ("Popup.", sf)):
+        thumb = lambda fill, on=on: rounded.rect(sw, 2 * sw + 48, (sw - px(4)) / 2, fill, on, inset=px(2))
+        name = f"R.{prefix}v.thumb"  # ต้องลงท้าย .thumb: ttk หา element นี้จากชื่อเพื่อวางตามตำแหน่งเลื่อน
+        _element(root, s, name, thumb(bd if T["dark"] else T["faint"]),
+                 [("pressed", thumb(T["muted"] if T["dark"] else T["text"])), ("active", thumb(T["muted"]))],
+                 border=(0, sw, 0, sw), padding=0, stretch="y")
+        s.layout(f"{prefix}Vertical.TScrollbar", [("Vertical.Scrollbar.trough", {"sticky": "ns", "children": [
+            (name, {"sticky": "nswe"})]})])
+        s.configure(f"{prefix}Vertical.TScrollbar", troughcolor=on, bordercolor=on, background=on)
+
+    # ---- กรอบ (อุปกรณ์เสียง / การเล่น) และกรอบรายการเสียง
+    rb = px(10)
+    _element(root, s, "R.labelframe", box(rb, bg, bd, mid=256), border=rb + 1, padding=px(2))
+    s.layout("TLabelframe", [("R.labelframe", {"sticky": "nswe"})])
+    # padding ต้องพอให้หัวคอลัมน์/แถวสี่เหลี่ยมไม่ทับเส้นขอบโค้ง (เส้นโค้งห่างมุมเข้ามา ~0.3 เท่าของรัศมี)
+    _element(root, s, "R.tree", box(rb, sf, bd, mid=256), border=rb + 1, padding=round(rb * 0.4) + 1)
+    s.layout("Treeview", _swap(s.layout("Treeview"), {"Treeview.field": "R.tree"}))
+    # หัวคอลัมน์: พื้นเดียวกับตาราง ไม่มีกรอบสี่เหลี่ยม (มุมจึงกลืนกับขอบโค้ง) มีแค่เส้นล่างและเส้นคั่นสั้นๆ
+    gap = px(8)
+    _element(root, s, "R.heading", rounded.header_cell(48, 2 * gap + 16, sf, bd, gap), border=(0, gap, 1, gap),
+             padding=0)
+    s.layout("Treeview.Heading", _swap(s.layout("Treeview.Heading"), {"Treeheading.cell": "R.heading"},
+                                       ("Treeheading.border",)))  # กรอบเดิมทับเส้นล่าง/เส้นคั่น
+    s.configure("Treeview.Heading", background=sf, bordercolor=sf, lightcolor=sf, darkcolor=sf)
+    s.map("Treeview.Heading", background=[], foreground=[("active", T["pink_hi"])])  # ชี้ = ตัวอักษรชมพู
+
+    # ---- ป้ายสถานะด้านล่าง: ทรงแคปซูล
+    rp = px(10)
+    for kind, (badge_bg, _, _, _) in status_colors().items():
+        _element(root, s, f"R.badge.{kind}", box(rp, badge_bg, on=sf), border=rp + 1, padding=0)
+        s.layout(f"Badge.{kind}.TLabel", _swap(s.layout("TLabel"), {"Label.border": f"R.badge.{kind}"}))
 
 
 def style_window(win):
     """พื้นหลังตามธีม + แถบชื่อหน้าต่างมืด/สว่างตามธีม และขอบสีชมพู (สีแถบและขอบใช้ได้บน Windows 11)"""
     win.configure(bg=T["bg"])
+    # หน้าต่างที่เพิ่งสร้าง: Windows แสดงเป็นสีขาวก่อน แล้วสีธีม/แถบชื่อค่อยตามมา (เห็นแวบขาว)
+    # จึงทำให้โปร่งใสไว้จนตั้งสีครบ แล้วค่อยแสดง
+    fresh = not win.winfo_ismapped()
+    if fresh:
+        try:
+            win.attributes("-alpha", 0.0)
+        except tk.TclError:
+            fresh = False
     _style_titlebar(win)
-    # หน้าต่างย่อยที่เพิ่งสร้าง: ตั้งสีตอนกรอบหน้าต่างยังวาดไม่เสร็จจะไม่ติด (แถบชื่อเป็นสีขาว) ตั้งซ้ำอีกครั้งหลังขึ้นจอ
-    win.after(60, lambda: win.winfo_exists() and _style_titlebar(win))
+
+    def finish(tries=0):
+        if not win.winfo_exists():
+            return
+        if not win.winfo_ismapped() and tries < 50:  # ยังซ่อนอยู่ (เช่น กล่องข้อความที่ยังจัดตำแหน่ง) รอให้ขึ้นจอก่อน
+            win.after(20, finish, tries + 1)
+            return
+        # ตั้งสีตอนกรอบหน้าต่างยังวาดไม่เสร็จจะไม่ติด จึงตั้งซ้ำหลังขึ้นจอ
+        _style_titlebar(win)
+        if fresh:
+            win.after(30, lambda: win.winfo_exists() and win.attributes("-alpha", 1.0))
+    win.after(60, finish)
 
 
 def _style_titlebar(win):

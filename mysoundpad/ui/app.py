@@ -11,7 +11,7 @@ from tkinter import ttk, filedialog
 import sounddevice as sd
 import soundfile as sf
 
-from .. import config
+from .. import config, rounded
 from ..audio import LONG_SOUND_SECONDS, MicPassthrough, MonitorTap, OutputMixer, list_devices, load_audio
 from ..config import (APP_NAME, APP_VERSION, AUDIO_EXT, STREAM_PREBUFFER, STREAM_TIMEOUT, UPDATE_CHECK_HOURS,
                       YT_MAX_MINUTES, YT_URL_RE)
@@ -138,10 +138,13 @@ class SoundpadApp:
         ttk.Button(top, text="⌨ ตั้งปุ่มลัด", command=self.set_hotkey).pack(side="left")
         ttk.Button(top, text="✏ เปลี่ยนชื่อ", command=self.rename).pack(side="left", padx=4)
         ttk.Button(top, text="🗑 ลบ", command=self.remove).pack(side="left")
-        ttk.Button(top, text="▶ เล่น", style="Pink.TButton", command=self.play_selected).pack(side="left", padx=(16, 4))
-        self.btn_pause = ttk.Button(top, text="⏸ พัก", style="Purple.TButton", width=9, command=self.toggle_pause)
-        self.btn_pause.pack(side="left")
-        ttk.Button(top, text="■ หยุด", style="Big.TButton", command=self.stop_all).pack(side="left", padx=(4, 0))
+        # เล่น / พัก / หยุด ชิดขวา (ขยายหน้าต่างแล้วยังอยู่มุมขวา) pack จากขวาสุดเข้ามา
+        ttk.Button(top, text="■ หยุด", style="Big.TButton", command=self.stop_all).pack(side="right")
+        self._make_pause_icons()
+        self.btn_pause = ttk.Button(top, text=" พัก", image=self.img_pause_btn, compound="left", style="Purple.TButton",
+                                    width=8, command=self.toggle_pause)
+        self.btn_pause.pack(side="right", padx=4)
+        ttk.Button(top, text="▶ เล่น", style="Pink.TButton", command=self.play_selected).pack(side="right", padx=(16, 0))
 
         # ---- แท็บหมวดหมู่: ทั้งหมด / ⭐ โปรด / หมวดที่สร้างเอง / ＋
         self.tabbar = ttk.Frame(self.root, padding=(12, 4, 12, 0))
@@ -152,8 +155,8 @@ class SoundpadApp:
         bar = ttk.Frame(self.root, padding=(12, 4, 12, 8))
         bar.pack(fill="x")
         ttk.Label(bar, text="🔍", font=(FONT, 13)).pack(side="left")
-        self.search_entry = ttk.Entry(bar, textvariable=self.v_search, font=(FONT, 12))
-        self.search_entry.pack(side="left", fill="x", expand=True, padx=6, ipady=4)
+        self.search_entry = ttk.Entry(bar, textvariable=self.v_search, font=(FONT, 11))
+        self.search_entry.pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(bar, text="✕ ล้าง", command=self._clear_search).pack(side="left")
         self.v_count = tk.StringVar()
         ttk.Label(bar, textvariable=self.v_count, style="Muted.TLabel", width=14, anchor="e").pack(side="left")
@@ -196,9 +199,12 @@ class SoundpadApp:
         nowbar = ttk.Frame(self.root, padding=(12, 8, 12, 0))
         nowbar.pack(fill="x")
         self.v_now_icon, self.v_now_name, self.v_now_time = tk.StringVar(), tk.StringVar(), tk.StringVar()
-        ttk.Label(nowbar, textvariable=self.v_now_icon, width=3, font=(FONT, 12)).pack(side="left")
+        # compound="center": จองที่ 3 ตัวอักษรไว้เสมอ สลับเป็นรูปขีดคู่ตอนพักแล้วแถวไม่ขยับ
+        self.lbl_now_icon = ttk.Label(nowbar, textvariable=self.v_now_icon, width=3, font=(FONT, 12), anchor="center",
+                                      compound="center")
+        self.lbl_now_icon.pack(side="left")
         self.lbl_now_name = ttk.Label(nowbar, textvariable=self.v_now_name, width=34)
-        self.lbl_now_name.pack(side="left")
+        self.lbl_now_name.pack(side="left", padx=(4, 0))
         self.lbl_now_time = ttk.Label(nowbar, textvariable=self.v_now_time, width=16, anchor="e")
         self.lbl_now_time.pack(side="right")
         self.seekbar = SeekBar(nowbar, self._on_seek)
@@ -254,6 +260,8 @@ class SoundpadApp:
         self._update_stop_btn()
         ttk.Checkbutton(opt, text="ตรวจสอบเวอร์ชันใหม่อัตโนมัติ", variable=self.v_auto_update,
                         command=self._save).grid(row=7, column=0, columnspan=2, sticky="w")
+        for w in opt.grid_slaves():  # เว้นระยะระหว่างบรรทัด ไม่ให้ดูติดกัน
+            w.grid_configure(pady=4)
 
         # ---- แถบสถานะ: ป้ายสี + ข้อความสี + เส้นสีด้านบน เปลี่ยนตามสถานะ
         sbar = ttk.Frame(self.root, style="StatusBar.TFrame")
@@ -739,7 +747,10 @@ class SoundpadApp:
         for m in (self.monitor, self.cable):
             if m:
                 m.paused = paused
-        self.btn_pause.config(text="▶ เล่นต่อ" if paused else "⏸ พัก")
+        if paused:
+            self.btn_pause.config(text=" เล่นต่อ", image=self.img_play_btn)  # มีรูปทั้งสองสถานะ ปุ่มจึงกว้างเท่าเดิม
+        else:
+            self.btn_pause.config(text=" พัก", image=self.img_pause_btn)
         if not quiet:
             self.v_status.set("⏸ พักไว้ — กด ▶ เล่นต่อ หรือ Space" if paused else "▶ เล่นต่อ")
 
@@ -757,6 +768,14 @@ class SoundpadApp:
         self._set_paused(False, quiet=True)
         if self.v_status.get().startswith(("⏳", "⏸")):
             self.v_status.set("■ หยุดแล้ว")
+
+    def _make_pause_icons(self):
+        """ไอคอนพัก (ขีดคู่) วาดเป็นรูป: ตัวอักษร ⏸ / ❚❚ ของ Windows ใหญ่และห่างเกิน ไม่เข้ากับ ▶ ■ บนปุ่มข้างๆ
+        เรียกซ้ำตอนสลับธีม รูปเดิมเปลี่ยนสีตาม"""
+        f = rounded.scale(self.root)
+        self.img_pause_btn = rounded.photo(self.root, "rr_pause_btn", rounded.pause_bars(9 * f, "#ffffff"))
+        self.img_play_btn = rounded.photo(self.root, "rr_play_btn", rounded.play_triangle(9 * f, "#ffffff"))
+        self.img_pause_now = rounded.photo(self.root, "rr_pause_now", rounded.pause_bars(11 * f, T["text"]))
 
     # ---------- กำลังเล่น / กระโดดไปช่วงอื่น
     def _sound_length(self, sid, mem_len):
@@ -797,7 +816,7 @@ class SoundpadApp:
             pos, dur = info[sid]
             if self.seekbar.drag is not None and dur:
                 pos = self.seekbar.drag * dur  # กำลังลากหลอด: แสดงเวลาที่จะกระโดดไป
-            icon = "⏸" if self.paused else ("🔁" if s.get("mode") == "loop" else "▶")
+            icon = "pause" if self.paused else ("🔁" if s.get("mode") == "loop" else "▶")
             more = f"  (+{len(info) - 1} เสียง)" if len(info) > 1 else ""
             text = (icon, self._clip(s["name"], 30 - len(more)) + more,
                     f"{fmt_clock(pos)} / {fmt_clock(dur)}" if dur else fmt_clock(pos))
@@ -811,7 +830,8 @@ class SoundpadApp:
             self.seekbar.set(0.0, enabled=False)
         if text != self._now_text:
             self._now_text = text
-            self.v_now_icon.set(text[0])
+            self.v_now_icon.set("" if text[0] == "pause" else text[0])
+            self.lbl_now_icon.config(image=self.img_pause_now if text[0] == "pause" else "")
             self.v_now_name.set(text[1])
             self.v_now_time.set(text[2])
             self.lbl_now_name.config(style="TLabel" if s else "Muted.TLabel")
@@ -1285,6 +1305,7 @@ class SoundpadApp:
         if self._voice_win:
             style_window(self._voice_win)
         self.seekbar.redraw(force=True)
+        self._make_pause_icons()
         for cb in (self.cb_monitor, self.cb_cable, self.cb_mic):  # รายการ dropdown ที่สร้างไปแล้ว
             try:
                 lb = f"{self.root.tk.call('ttk::combobox::PopdownWindow', cb)}.f.l"
@@ -1437,6 +1458,7 @@ class SoundpadApp:
             self.v_status.set(f"⚠ บันทึกไม่ได้: {e}")
 
     def _on_close(self):
+        self.root.withdraw()  # ซ่อนหน้าต่างทันทีที่กด X แล้วค่อยเก็บกวาดเบื้องหลัง
         self._save()
         self.hotkeys.stop()
         self.stop_all()  # ปิด ffmpeg ของสตรีมด้วย
